@@ -524,7 +524,8 @@ origins = [
     "https://bab4f4a54b2b.ngrok-free.app",
     "http://10.12.88.79:5001",
     "https://2440df7ab360.ngrok-free.app",
-    "https://bab4f4a54b2b.ngrok-free.app"
+    "https://bab4f4a54b2b.ngrok-free.app",
+    "*"
 ]
 
 app.add_middleware(
