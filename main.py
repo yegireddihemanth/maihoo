@@ -681,7 +681,6 @@ async def login(body: loginRequest, response: Response):
         secure=cookieSecure,
         samesite=cookieSameSite,
         max_age=cookieMaxAge,
-        partitioned=True,
         path="/",
         domain=".ngrok-free.app",
     )
