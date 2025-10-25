@@ -36,7 +36,8 @@ origins = [
     "https://localhost:3000",
     "http://127.0.0.1:3000",
     "https://bgv-frontend.onrender.com",
-    "https://*.ngrok-free.app"
+    "https://*.ngrok-free.app",
+    "*"
 ]
 
 app.add_middleware(
