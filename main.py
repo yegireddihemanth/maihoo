@@ -693,7 +693,8 @@ async def login(body: loginRequest, response: Response):
         "role": user.get("role"),
         "organizationId": orgId,
         "isSuperAdmin": isSuperAdmin,
-        "session": "created"
+        "session": "created",
+        "token" : token
     }
 
 
