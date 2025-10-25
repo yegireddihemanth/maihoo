@@ -13,7 +13,7 @@ from fastapi.encoders import jsonable_encoder
 # Config
 # -------------------------------
 # 🔒 Using your provided MongoDB URI directly
-mongoUri = "mongodb+srv://maihoo:akonpopStar@143@maihoo.ztaytqd.mongodb.net/?appName=maihoo"
+mongoUri = "mongodb+srv://maihoo:akonpopStar%40143@maihoo.ztaytqd.mongodb.net/?appName=maihoo"
 mongoDbName = "bgv_core"
 sessionSecret = b"super-secret-key"
 
