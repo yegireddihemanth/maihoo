@@ -4,23 +4,19 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi.responses import JSONResponse
 from datetime import datetime, timezone
 from typing import List, Optional
-import os, time, hmac, hashlib, base64, json
+import time, hmac, hashlib, base64, json
 from fastapi.middleware.cors import CORSMiddleware
 from bson import ObjectId
 from fastapi.encoders import jsonable_encoder
-from dotenv import load_dotenv
-
-# -------------------------------
-# Load Environment Variables
-# -------------------------------
-load_dotenv()
 
 # -------------------------------
 # Config
 # -------------------------------
-mongoUri = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-mongoDbName = os.getenv("MONGO_DB", "bgv_core")
-sessionSecret = os.getenv("SESSION_SECRET", "super-secret-key").encode()
+# 🔒 Using your provided MongoDB URI directly
+mongoUri = "mongodb+srv://maihoo:tzAnnPiezHR5RYtZ@maihoo.ztaytqd.mongodb.net/?retryWrites=true&w=majority"
+mongoDbName = "bgv_core"
+sessionSecret = b"super-secret-key"
+
 cookieName = "bgvSession"
 cookieMaxAge = 60 * 60 * 2
 cookieSecure = True
@@ -31,18 +27,16 @@ cookieSameSite = "none"
 # -------------------------------
 app = FastAPI(title="BGV Login API with Cookies", version="1.0.0")
 
-origins = [
-    "http://localhost:3000",
-    "https://localhost:3000",
-    "http://127.0.0.1:3000",
-    "https://bgv-frontend.onrender.com",
-    "https://*.ngrok-free.app",
-    "*"
-]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://.*",
+    allow_origins=[
+        "http://localhost:3000",
+        "https://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://bgv-frontend.onrender.com",
+        "https://*.ngrok-free.app",
+        "*",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -69,6 +63,7 @@ def toStrId(doc):
         d["_id"] = str(d["_id"])
     return d
 
+
 # -------------------------------
 # Activity Logging Helper
 # -------------------------------
@@ -82,9 +77,10 @@ async def logActivity(user: dict, action: str, details: str, status: str = "Succ
         "action": action,
         "details": details,
         "status": status,
-        "timestamp": datetime.now(timezone.utc).isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     await activityLogsCol.insert_one(logDoc)
+
 
 # -------------------------------
 # Models
@@ -93,13 +89,16 @@ class loginRequest(BaseModel):
     email: str
     password: str
 
+
 class ServiceItem(BaseModel):
     serviceName: str
     price: float
 
+
 class CredentialsModel(BaseModel):
     totalAllowed: int
     used: Optional[int] = 0
+
 
 class OrganizationRegistration(BaseModel):
     organizationName: str
@@ -112,6 +111,7 @@ class OrganizationRegistration(BaseModel):
     logoUrl: Optional[str] = None
     credentials: CredentialsModel
 
+
 # -------------------------------
 # Token helpers (HMAC)
 # -------------------------------
@@ -119,6 +119,7 @@ def encodeToken(payload: dict) -> str:
     body = json.dumps(payload, separators=(",", ":")).encode()
     sig = hmac.new(sessionSecret, body, hashlib.sha256).digest()
     return f"{base64.urlsafe_b64encode(body).decode().rstrip('=')}.{base64.urlsafe_b64encode(sig).decode().rstrip('=')}"
+
 
 def decodeToken(token: str) -> dict:
     try:
@@ -135,6 +136,7 @@ def decodeToken(token: str) -> dict:
     except Exception:
         raise HTTPException(status_code=401, detail="invalid or expired session")
 
+
 # -------------------------------
 # Auth dependency
 # -------------------------------
@@ -149,35 +151,26 @@ async def requireAuth(request: Request):
         raise HTTPException(status_code=401, detail="user not found")
     return user
 
+
 # -------------------------------
 # Auth Routes
 # -------------------------------
 @app.post("/auth/login")
 async def login(body: loginRequest, response: Response):
-    user = await usersCol.find_one({
-        "email": body.email,
-        "password": body.password,
-        "isActive": True
-    })
+    user = await usersCol.find_one(
+        {"email": body.email, "password": body.password, "isActive": True}
+    )
     if not user:
         raise HTTPException(status_code=401, detail="invalid credentials")
 
-    orgDoc = None
     orgId = user.get("organizationId")
-    if orgId:
-        try:
-            orgDoc = await orgsCol.find_one({"_id": ObjectId(orgId)})
-        except:
-            orgDoc = await orgsCol.find_one({"_id": orgId})
-
-    isSuperAdmin = user.get("role") == "SUPER_ADMIN"
     now = int(time.time())
     payload = {
         "email": user["email"],
         "role": user["role"],
         "organizationId": orgId,
         "iat": now,
-        "exp": now + cookieMaxAge
+        "exp": now + cookieMaxAge,
     }
     token = encodeToken(payload)
 
@@ -188,8 +181,7 @@ async def login(body: loginRequest, response: Response):
         secure=cookieSecure,
         samesite=cookieSameSite,
         max_age=cookieMaxAge,
-        partitioned=True,
-        path="/"
+        path="/",
     )
 
     await logActivity(user, "User Login", f"{user.get('email')} logged in.", "Success")
@@ -199,9 +191,9 @@ async def login(body: loginRequest, response: Response):
         "email": user.get("email"),
         "role": user.get("role"),
         "organizationId": orgId,
-        "isSuperAdmin": isSuperAdmin,
-        "session": "created"
+        "session": "created",
     }
+
 
 @app.post("/auth/logout")
 async def logout(user: dict = Depends(requireAuth), response: Response = None):
@@ -210,19 +202,26 @@ async def logout(user: dict = Depends(requireAuth), response: Response = None):
         response.delete_cookie(key=cookieName, path="/")
     return {"ok": True}
 
+
 # -------------------------------
 # Get All Organizations
 # -------------------------------
 @app.get("/secure/getAllOrganizations")
 async def getAllOrganizations(user: dict = Depends(requireAuth)):
     if user.get("role") != "SUPER_ADMIN":
-        raise HTTPException(status_code=403, detail="Only SUPER_ADMIN can access all organizations")
+        raise HTTPException(
+            status_code=403, detail="Only SUPER_ADMIN can access all organizations"
+        )
     cursor = orgsCol.find({})
     orgList = await cursor.to_list(None)
     for org in orgList:
         org["_id"] = str(org["_id"])
-    await logActivity(user, "View Organizations", "Fetched all organizations list.", "Success")
-    return JSONResponse(status_code=200, content={"totalOrganizations": len(orgList), "organizations": orgList})
+    await logActivity(user, "View Organizations", "Fetched all organizations list.")
+    return JSONResponse(
+        status_code=200,
+        content={"totalOrganizations": len(orgList), "organizations": orgList},
+    )
+
 
 # -------------------------------
 # Register Organization
@@ -239,7 +238,6 @@ async def registerOrganization(body: OrganizationRegistration, user: dict = Depe
         "$or": [{"email": body.email}, {"mainDomain": body.mainDomain}, {"subDomain": autoSubDomain}]
     })
     if existingOrg:
-        await logActivity(user, "Register Organization Failed", f"Duplicate domain or email: {body.email}", "Error")
         raise HTTPException(status_code=409, detail="Organization already exists")
 
     now = datetime.now(timezone.utc).isoformat()
@@ -256,7 +254,7 @@ async def registerOrganization(body: OrganizationRegistration, user: dict = Depe
         "createdBy": user.get("email"),
         "createdAt": now,
         "updatedAt": now,
-        "isActive": True
+        "isActive": True,
     }
 
     insertOrg = await orgsCol.insert_one(orgDoc)
@@ -270,10 +268,11 @@ async def registerOrganization(body: OrganizationRegistration, user: dict = Depe
         "organizationId": orgId,
         "isActive": True,
         "createdAt": now,
-        "createdBy": user.get("email")
+        "createdBy": user.get("email"),
     }
     await usersCol.insert_one(spocUser)
-    await logActivity(user, "Created Organization", f"Organization '{body.organizationName}' created.", "Success")
+
+    await logActivity(user, "Created Organization", f"Organization '{body.organizationName}' created.")
 
     return JSONResponse(
         status_code=201,
@@ -282,9 +281,10 @@ async def registerOrganization(body: OrganizationRegistration, user: dict = Depe
             "orgId": orgId,
             "organizationName": body.organizationName,
             "spocEmail": body.email,
-            "defaultPassword": "Welcome@123"
-        })
+            "defaultPassword": "Welcome@123",
+        }),
     )
+
 
 # -------------------------------
 # Dashboard
@@ -306,9 +306,8 @@ async def getDashboard(user: dict = Depends(requireAuth)):
             "totalRequests": totalRequests,
             "ongoingVerifications": ongoingCount,
             "completedVerifications": completedCount,
-            "failedVerifications": failedCount
+            "failedVerifications": failedCount,
         }
-        await logActivity(user, "View Dashboard", "Super Admin viewed dashboard.", "Success")
         return JSONResponse(status_code=200, content=jsonable_encoder({"role": "SUPER_ADMIN", "stats": stats}))
 
     elif role == "ORG_HR":
@@ -323,9 +322,8 @@ async def getDashboard(user: dict = Depends(requireAuth)):
             "totalRequests": totalRequests,
             "ongoingVerifications": ongoingCount,
             "completedVerifications": completedCount,
-            "failedVerifications": failedCount
+            "failedVerifications": failedCount,
         }
-        await logActivity(user, "View Dashboard", f"ORG_HR viewed dashboard for org {orgId}.", "Success")
         return JSONResponse(status_code=200, content=jsonable_encoder({"role": "ORG_HR", "stats": stats}))
 
     elif role == "EMPLOYEE":
@@ -339,64 +337,13 @@ async def getDashboard(user: dict = Depends(requireAuth)):
             "totalAssigned": totalRequests,
             "ongoingVerifications": ongoingCount,
             "completedVerifications": completedCount,
-            "failedVerifications": failedCount
+            "failedVerifications": failedCount,
         }
-        await logActivity(user, "View Dashboard", f"Employee viewed personal dashboard.", "Success")
         return JSONResponse(status_code=200, content=jsonable_encoder({"role": "EMPLOYEE", "stats": stats}))
 
     else:
         raise HTTPException(status_code=403, detail="Unknown role or not authorized")
 
-# -------------------------------
-# Update Organization
-# -------------------------------
-@app.put("/secure/updateOrganization/{orgId}")
-async def updateOrganization(orgId: str, body: dict, user: dict = Depends(requireAuth)):
-    if user.get("role") != "SUPER_ADMIN":
-        raise HTTPException(status_code=403, detail="Only SUPER_ADMIN can update organizations")
-
-    try:
-        object_id = ObjectId(orgId)
-    except Exception:
-        await logActivity(user, "Update Organization Failed", f"Invalid organization ID: {orgId}", "Error")
-        raise HTTPException(status_code=400, detail="Invalid organization ID")
-
-    org = await orgsCol.find_one({"_id": object_id})
-    if not org:
-        await logActivity(user, "Update Organization Failed", f"Organization not found: {orgId}", "Error")
-        raise HTTPException(status_code=404, detail="Organization not found")
-
-    validFields = [
-        "organizationName", "spocName", "mainDomain", "subDomain", "email",
-        "gstNumber", "services", "logoUrl", "credentials", "isActive"
-    ]
-
-    updateData = {k: body[k] for k in validFields if k in body}
-    if not updateData:
-        raise HTTPException(status_code=400, detail="No valid fields provided for update")
-
-    updateData["updatedAt"] = datetime.now(timezone.utc).isoformat()
-    await orgsCol.update_one({"_id": object_id}, {"$set": updateData})
-    updatedOrg = await orgsCol.find_one({"_id": object_id})
-    if "_id" in updatedOrg:
-        updatedOrg["_id"] = str(updatedOrg["_id"])
-
-    await logActivity(user, "Updated Organization", f"Updated organization '{updatedOrg.get('organizationName')}'.", "Success")
-    return JSONResponse(status_code=200, content={"message": "Organization details updated successfully", "updatedOrganization": updatedOrg})
-
-# -------------------------------
-# Fetch Activity Logs
-# -------------------------------
-@app.get("/secure/activityLogs")
-async def getActivityLogs(user: dict = Depends(requireAuth)):
-    query = {}
-    if user.get("role") != "SUPER_ADMIN":
-        query["organizationId"] = user.get("organizationId")
-    cursor = activityLogsCol.find(query).sort("timestamp", -1)
-    logs = await cursor.to_list(length=200)
-    for log in logs:
-        log["_id"] = str(log["_id"])
-    return {"totalLogs": len(logs), "logs": logs}
 
 # -------------------------------
 # Health Check
