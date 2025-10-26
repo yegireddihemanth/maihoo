@@ -11,7 +11,7 @@ from bson import ObjectId
 from fastapi.encoders import jsonable_encoder
 
 # -------------------------------
-# Config
+# Config here 
 # -------------------------------
 mongoUri = "mongodb://localhost:27017"
 mongoDbName = "bgv_core"
