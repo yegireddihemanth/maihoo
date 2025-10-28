@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, Response, Depends
+from fastapi import FastAPI, HTTPException, Request, Response, Depends, Body
 from pydantic import BaseModel
 from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi.responses import JSONResponse
@@ -94,7 +94,6 @@ class CredentialsModel(BaseModel):
     totalAllowed: int
     used: Optional[int] = 0
 
-# ✅ Added phoneNumber
 class HrAdminModel(BaseModel):
     userName: str
     email: str
@@ -113,7 +112,6 @@ class OrganizationRegistration(BaseModel):
     logoUrl: Optional[str] = None
     credentials: CredentialsModel
     hrAdmin: HrAdminModel
-
 
 # -------------------------------
 # Token helpers (HMAC)
@@ -219,7 +217,6 @@ async def logout(user: dict = Depends(requireAuth), response: Response = None):
         response.delete_cookie(key=cookieName, path="/")
     return {"ok": True}
 
-
 # -------------------------------
 # Register Organization
 # -------------------------------
@@ -243,7 +240,6 @@ async def registerOrganization(body: OrganizationRegistration, user: dict = Depe
         raise HTTPException(status_code=409, detail="Organization with same email or domain already exists")
 
     now = datetime.now(timezone.utc).isoformat()
-
     orgDoc = {
         "organizationName": body.organizationName,
         "spocName": body.spocName,
@@ -277,7 +273,7 @@ async def registerOrganization(body: OrganizationRegistration, user: dict = Depe
         "email": hr.email,
         "password": hr.password or "Welcome1",
         "role": hr.role,
-        "phoneNumber": hr.phoneNumber,  # ✅ added phone number
+        "phoneNumber": hr.phoneNumber,
         "organizationId": orgId,
         "permissions": DEFAULT_HR_PERMISSIONS,
         "isActive": True,
@@ -349,7 +345,12 @@ async def getDashboard(user: dict = Depends(requireAuth)):
         return JSONResponse(status_code=200, content=jsonable_encoder({"role": "SUPER_ADMIN", "stats": stats}))
 
     elif role == "ORG_HR":
-        employeeCount = await usersCol.count_documents({"organizationId": orgId, "role": "EMPLOYEE"})
+        employeeCount = await usersCol.count_documents({
+        "organizationId": orgId,
+        "role": {"$in": ["ORG_HR", "HELPER", "EMPLOYEE"]},
+        "isActive": True
+        })
+
         totalRequests = await verificationsCol.count_documents({"organizationId": orgId})
         ongoingCount = await verificationsCol.count_documents({"organizationId": orgId, "status": {"$in": ["PENDING", "IN_PROGRESS"]}})
         completedCount = await verificationsCol.count_documents({"organizationId": orgId, "status": "COMPLETED"})
@@ -366,7 +367,7 @@ async def getDashboard(user: dict = Depends(requireAuth)):
         await logActivity(user, "View Dashboard", f"ORG_HR viewed dashboard for org {orgId}.", "Success")
         return JSONResponse(status_code=200, content=jsonable_encoder({"role": "ORG_HR", "stats": stats}))
 
-    elif role == "EMPLOYEE":
+    elif role in ["EMPLOYEE", "HELPER"]:
         userId = str(user["_id"])
         totalRequests = await verificationsCol.count_documents({"verifiedByUserId": userId})
         ongoingCount = await verificationsCol.count_documents({"verifiedByUserId": userId, "status": {"$in": ["PENDING", "IN_PROGRESS"]}})
@@ -380,8 +381,9 @@ async def getDashboard(user: dict = Depends(requireAuth)):
             "failedVerifications": failedCount
         }
 
-        await logActivity(user, "View Dashboard", "Employee viewed personal dashboard.", "Success")
-        return JSONResponse(status_code=200, content=jsonable_encoder({"role": "EMPLOYEE", "stats": stats}))
+        await logActivity(user, "View Dashboard", "Helper viewed personal dashboard.", "Success")
+        return JSONResponse(status_code=200, content=jsonable_encoder({"role": role, "stats": stats}))
+
 
     else:
         raise HTTPException(status_code=403, detail="Unknown role or not authorized")
@@ -429,6 +431,78 @@ async def updateOrganization(orgId: str, body: dict, user: dict = Depends(requir
     return JSONResponse(
         status_code=200,
         content={"message": "Organization details updated successfully", "updatedOrganization": updatedOrg}
+    )
+
+# -------------------------------
+# Add Helper User (for Super Admin or HR)
+# -------------------------------
+@app.post("/secure/addHelper")
+async def addHelper(body: dict = Body(...), user: dict = Depends(requireAuth)):
+    role = user.get("role")
+    if role not in ["SUPER_ADMIN", "ORG_HR"]:
+        raise HTTPException(status_code=403, detail="Only SUPER_ADMIN or ORG_HR can add helpers")
+
+    helperName = body.get("userName")
+    helperEmail = body.get("email")
+    helperRole = body.get("role")
+    helperPhone = body.get("phoneNumber")
+    helperPermissions = body.get("permissions", [])
+    helperIsActive = body.get("isActive", True)
+    helperPassword = body.get("password") or "Welcome1"
+
+    if not helperName or not helperEmail or not helperRole:
+        raise HTTPException(status_code=400, detail="Missing required fields: userName, email, role")
+
+    orgId = user.get("organizationId")
+    createdBy = user.get("email")
+
+    org = await orgsCol.find_one({"_id": ObjectId(orgId)})
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    totalAllowed = org.get("credentials", {}).get("totalAllowed", 0)
+    activeUsersCount = await usersCol.count_documents({"organizationId": orgId, "isActive": True})
+
+    if activeUsersCount >= totalAllowed:
+        await logActivity(user, "Add Helper Failed", f"User limit reached ({activeUsersCount}/{totalAllowed}) for org {orgId}", "Error")
+        raise HTTPException(status_code=409, detail="User limit exceeded. Cannot add more helpers.")
+
+    existingUser = await usersCol.find_one({"email": helperEmail})
+    if existingUser:
+        raise HTTPException(status_code=409, detail="A user with this email already exists")
+
+    now = datetime.now(timezone.utc).isoformat()
+    helperDoc = {
+        "userName": helperName,
+        "email": helperEmail,
+        "password": helperPassword,
+        "role": helperRole,
+        "phoneNumber": helperPhone,
+        "permissions": helperPermissions,
+        "isActive": helperIsActive,
+        "organizationId": orgId,
+        "createdAt": now,
+        "createdBy": createdBy
+    }
+
+    insertResult = await usersCol.insert_one(helperDoc)
+    helperId = str(insertResult.inserted_id)
+
+    newActiveUsersCount = await usersCol.count_documents({"organizationId": orgId, "isActive": True})
+    await orgsCol.update_one({"_id": ObjectId(orgId)}, {"$set": {"credentials.used": newActiveUsersCount}})
+
+    await logActivity(user, "Added Helper User", f"{createdBy} added helper {helperEmail} (role: {helperRole})", "Success")
+
+    return JSONResponse(
+        status_code=201,
+        content=jsonable_encoder({
+            "message": "Helper user added successfully",
+            "userId": helperId,
+            "organizationId": orgId,
+            "usedCredentials": newActiveUsersCount,
+            "totalAllowed": totalAllowed,
+            "defaultPassword": helperPassword
+        })
     )
 
 # -------------------------------
