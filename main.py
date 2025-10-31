@@ -517,13 +517,24 @@ async def getActivityLogs(user: dict = Depends(requireAuth)):
     cursor = activityLogsCol.find(query).sort("timestamp", -1)
     logs = await cursor.to_list(length=200)
 
-    # Convert all ObjectIds safely
-    encodedLogs = [jsonable_encoder(log) for log in logs]
+    # Convert ObjectIds to string for each log (same convention as other functions)
+    for log in logs:
+        if "_id" in log:
+            log["_id"] = str(log["_id"])
+        if "userId" in log and isinstance(log["userId"], ObjectId):
+            log["userId"] = str(log["userId"])
+        if "organizationId" in log and isinstance(log["organizationId"], ObjectId):
+            log["organizationId"] = str(log["organizationId"])
 
+    # Use JSONResponse and jsonable_encoder like all other endpoints
     return JSONResponse(
         status_code=200,
-        content={"totalLogs": len(encodedLogs), "logs": encodedLogs}
+        content=jsonable_encoder({
+            "totalLogs": len(logs),
+            "logs": logs
+        })
     )
+
 
 # -------------------------------
 # Health Check
