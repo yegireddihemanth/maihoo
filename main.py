@@ -516,10 +516,14 @@ async def getActivityLogs(user: dict = Depends(requireAuth)):
 
     cursor = activityLogsCol.find(query).sort("timestamp", -1)
     logs = await cursor.to_list(length=200)
-    for log in logs:
-        log["_id"] = str(log["_id"])
 
-    return {"totalLogs": len(logs), "logs": logs}
+    # Convert all ObjectIds safely
+    encodedLogs = [jsonable_encoder(log) for log in logs]
+
+    return JSONResponse(
+        status_code=200,
+        content={"totalLogs": len(encodedLogs), "logs": encodedLogs}
+    )
 
 # -------------------------------
 # Health Check
