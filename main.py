@@ -453,11 +453,22 @@ async def addHelper(body: dict = Body(...), user: dict = Depends(requireAuth)):
     if not helperName or not helperEmail or not helperRole:
         raise HTTPException(status_code=400, detail="Missing required fields: userName, email, role")
 
-    orgId = body.get("organizationId") if user.get("role") == "SUPER_ADMIN" else user.get("organizationId")
+    # 🧠 Organization selection logic
+    # SUPER_ADMIN can add to any org by giving orgId; if not given, default to their own org
+    if role == "SUPER_ADMIN":
+        orgId = body.get("organizationId") or user.get("organizationId")
+    else:
+        orgId = user.get("organizationId")
 
-    createdBy = user.get("email")
+    if not orgId:
+        raise HTTPException(status_code=400, detail="Organization ID missing or invalid")
 
-    org = await orgsCol.find_one({"_id": ObjectId(orgId)})
+    # 🧾 Validate organization
+    try:
+        org = await orgsCol.find_one({"_id": ObjectId(orgId)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid organization ID format")
+
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
@@ -483,26 +494,73 @@ async def addHelper(body: dict = Body(...), user: dict = Depends(requireAuth)):
         "isActive": helperIsActive,
         "organizationId": orgId,
         "createdAt": now,
-        "createdBy": createdBy
+        "createdBy": user.get("email")
     }
 
     insertResult = await usersCol.insert_one(helperDoc)
     helperId = str(insertResult.inserted_id)
 
+    # 🔄 Update used credentials count for that organization
     newActiveUsersCount = await usersCol.count_documents({"organizationId": orgId, "isActive": True})
     await orgsCol.update_one({"_id": ObjectId(orgId)}, {"$set": {"credentials.used": newActiveUsersCount}})
 
-    await logActivity(user, "Added Helper User", f"{createdBy} added helper {helperEmail} (role: {helperRole})", "Success")
+    await logActivity(
+        user,
+        "Added Helper User",
+        f"{user.get('email')} added helper {helperEmail} (role: {helperRole}) under org {org.get('organizationName')}",
+        "Success"
+    )
+
+    # 🧠 Construct response
+    response_data = {
+        "message": "Helper user added successfully",
+        "organization": {
+            "organizationId": str(org["_id"]),
+            "organizationName": org.get("organizationName")
+        },
+        "helper": {
+            "userId": helperId,
+            "userName": helperName,
+            "email": helperEmail,
+            "role": helperRole,
+            "phoneNumber": helperPhone,
+            "permissions": helperPermissions,
+            "isActive": helperIsActive,
+            "defaultPassword": helperPassword
+        },
+        "credentialsStatus": {
+            "used": newActiveUsersCount,
+            "totalAllowed": totalAllowed
+        }
+    }
+
+    return JSONResponse(status_code=201, content=jsonable_encoder(response_data))
+
+@app.get("/secure/getOrganizationList")
+async def getOrganizationList(user: dict = Depends(requireAuth)):
+    # Only SUPER_ADMIN can fetch all organizations
+    if user.get("role") != "SUPER_ADMIN":
+        raise HTTPException(status_code=403, detail="Only SUPER_ADMIN can access organization list")
+
+    # Fetch only active organizations
+    cursor = orgsCol.find({"isActive": True}, {"organizationName": 1})
+    orgList = await cursor.to_list(None)
+
+    result = [
+        {
+            "organizationId": str(org["_id"]),
+            "organizationName": org.get("organizationName")
+        }
+        for org in orgList
+    ]
+
+    await logActivity(user, "View Organization List", f"Fetched {len(result)} organizations", "Success")
 
     return JSONResponse(
-        status_code=201,
+        status_code=200,
         content=jsonable_encoder({
-            "message": "Helper user added successfully",
-            "userId": helperId,
-            "organizationId": orgId,
-            "usedCredentials": newActiveUsersCount,
-            "totalAllowed": totalAllowed,
-            "defaultPassword": helperPassword
+            "organizations": result,
+            "total": len(result)
         })
     )
 
