@@ -1262,19 +1262,12 @@ async def initiateVerification(body: dict = Body(...), user: dict = Depends(requ
             # If reached here, all passed
             await verificationsCol.update_one(
                 {"_id": ObjectId(verification_id)},
-                {"$set": {
-                    "overallStatus": "COMPLETED",
-                    "currentStage": "final",
-                    "completedAt": datetime.now(timezone.utc).isoformat()
-                }}
+                {"$set": {"overallStatus": "COMPLETED", "currentStage": "final"}}
             )
-
-            # ✅ Reset candidate status to VERIFIED (even if previously failed)
             await candidatesCol.update_one(
                 {"_id": candidateObjId},
                 {"$set": {"status": "VERIFIED"}}
             )
-
             await logActivity(
                 user,
                 "Verification Completed",

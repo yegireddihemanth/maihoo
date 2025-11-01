@@ -1,4 +1,3 @@
-# apis.py
 import asyncio
 import random
 from datetime import datetime, timezone
@@ -6,10 +5,13 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 
 # -----------------------
-# 🧩 MongoDB Connection
+# 🧩 MongoDB Connection (Atlas)
 # -----------------------
-client = AsyncIOMotorClient("mongodb://localhost:27017")
-db = client["bgvAppDB"]
+mongoUri = "mongodb+srv://maihoo:akonpopStar%40143@maihoo.ztaytqd.mongodb.net/?appName=maihoo"
+mongoDbName = "bgv_core"
+
+client = AsyncIOMotorClient(mongoUri)
+db = client[mongoDbName]
 
 verificationsCol = db["verifications"]
 candidatesCol = db["candidates"]
@@ -47,17 +49,11 @@ async def verify_uan(uan_number: str = None):
 async def verify_fir(candidate_name: str):
     return await simulate_processing("FIR / Criminal Record")
 
-async def verify_passport(passport_number: str = None):
-    return await simulate_processing("Passport Verification")
-
 # -----------------------
 # 🎓 Final Checks
 # -----------------------
-async def verify_education(candidate_name: str):
-    return await simulate_processing("Education / Degree")
-
-async def verify_employment(candidate_name: str):
-    return await simulate_processing("Employment History")
+async def verify_degree(candidate_name: str):
+    return await simulate_processing("Degree Verification")
 
 async def verify_cibil(candidate_name: str):
     return await simulate_processing("CIBIL / Credit Score")
@@ -67,32 +63,29 @@ async def verify_cibil(candidate_name: str):
 # -----------------------
 async def run_verification(check_type: str, candidate: dict):
     """Route to the correct verification function."""
-    check_type = check_type.lower()
+    check_type = check_type.lower().replace(" ", "_")
 
-    # --- Primary ---
-    if check_type == "aadhaar":
+    # --- Primary Stage ---
+    if check_type in ["aadhaar", "aadhaar_verification"]:
         return await verify_aadhaar(candidate.get("aadhaarNumber"))
-    elif check_type == "pan":
+    elif check_type in ["pan", "pan_verification"]:
         return await verify_pan(candidate.get("panNumber"))
-    elif check_type == "bankaccount":
+    elif check_type in ["bankaccount", "bank_account", "bank_account_verification", "bank"]:
         return await verify_bank_account()
 
-    # --- Secondary ---
-    elif check_type == "uan":
+    # --- Secondary Stage ---
+    elif check_type in ["uan", "uan_verification"]:
         return await verify_uan()
-    elif check_type == "fir":
+    elif check_type in ["fir", "criminal", "criminal_record", "criminal_record_verification"]:
         return await verify_fir(candidate.get("firstName"))
-    elif check_type == "passport":
-        return await verify_passport()
 
-    # --- Final ---
-    elif check_type == "education":
-        return await verify_education(candidate.get("firstName"))
-    elif check_type == "employment":
-        return await verify_employment(candidate.get("firstName"))
-    elif check_type == "cibil":
+    # --- Final Stage ---
+    elif check_type in ["degree", "degree_verification", "education", "education_verification"]:
+        return await verify_degree(candidate.get("firstName"))
+    elif check_type in ["cibil", "cibil_report", "cibil_score"]:
         return await verify_cibil(candidate.get("firstName"))
 
+    # ❌ Unknown type
     else:
         return "FAILED", f"Unknown check type: {check_type}"
 
