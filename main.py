@@ -453,7 +453,8 @@ async def addHelper(body: dict = Body(...), user: dict = Depends(requireAuth)):
     if not helperName or not helperEmail or not helperRole:
         raise HTTPException(status_code=400, detail="Missing required fields: userName, email, role")
 
-    orgId = user.get("organizationId")
+    orgId = body.get("organizationId") if user.get("role") == "SUPER_ADMIN" else user.get("organizationId")
+
     createdBy = user.get("email")
 
     org = await orgsCol.find_one({"_id": ObjectId(orgId)})
