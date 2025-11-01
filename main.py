@@ -724,6 +724,92 @@ async def getUsers(user: dict = Depends(requireAuth)):
         })
     )
 
+@app.put("/secure/updateUser/{userId}")
+async def updateUser(userId: str, body: dict = Body(...), user: dict = Depends(requireAuth)):
+    role = user.get("role")
+
+    # --- Validate ID ---
+    try:
+        object_id = ObjectId(userId)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid user ID format")
+
+    # --- Find Target User ---
+    targetUser = await usersCol.find_one({"_id": object_id})
+    if not targetUser:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    targetOrgId = targetUser.get("organizationId")
+
+    # --- Role-Based Access Control ---
+    if role == "SUPER_ADMIN":
+        pass  # full control
+
+    elif role == "SUPER_ADMIN_HELPER":
+        accessible = user.get("accessibleOrganizations", [])
+        if targetOrgId not in accessible:
+            raise HTTPException(status_code=403, detail="Not authorized to modify this user")
+
+    elif role == "ORG_HR":
+        if targetOrgId != user.get("organizationId"):
+            raise HTTPException(status_code=403, detail="Not authorized to modify users in other organizations")
+
+    else:
+        raise HTTPException(status_code=403, detail="Not authorized to update users")
+
+    # --- Define Editable Fields Based on Role ---
+    editableFields = [
+        "userName",
+        "phoneNumber",
+        "permissions",
+        "isActive",
+        "password"
+    ]
+
+    # Super Admin can also edit role + accessibleOrganizations
+    if role == "SUPER_ADMIN":
+        editableFields.extend(["role", "organizationId", "accessibleOrganizations"])
+
+    # Super Admin Helper can edit role within allowed orgs, but only assign orgs within his accessible list
+    if role == "SUPER_ADMIN_HELPER":
+        editableFields.append("role")
+        if "organizationId" in body and body["organizationId"] not in user.get("accessibleOrganizations", []):
+            raise HTTPException(status_code=403, detail="Cannot assign user to unapproved organization")
+
+    updateData = {k: body[k] for k in editableFields if k in body}
+    if not updateData:
+        raise HTTPException(status_code=400, detail="No valid fields provided for update")
+
+    updateData["updatedAt"] = datetime.now(timezone.utc).isoformat()
+
+    # --- Update in DB ---
+    await usersCol.update_one({"_id": object_id}, {"$set": updateData})
+    updatedUser = await usersCol.find_one({"_id": object_id}, {"password": 0})
+
+    # --- Attach Organization Name ---
+    org = await orgsCol.find_one({"_id": ObjectId(updatedUser["organizationId"])}, {"organizationName": 1})
+    if org:
+        updatedUser["organizationName"] = org.get("organizationName")
+
+    updatedUser["_id"] = str(updatedUser["_id"])
+
+    # --- Log Activity ---
+    await logActivity(
+        user,
+        "Updated User",
+        f"{user.get('email')} updated user {updatedUser.get('email')} (Role: {updatedUser.get('role')})",
+        "Success"
+    )
+
+    # --- Response ---
+    return JSONResponse(
+        status_code=200,
+        content=jsonable_encoder({
+            "message": "User updated successfully",
+            "updatedUser": updatedUser
+        })
+    )
+
 @app.get("/secure/getOrganizations")
 async def getOrganizations(user: dict = Depends(requireAuth)):
     role = user.get("role")
