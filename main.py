@@ -536,33 +536,63 @@ async def addHelper(body: dict = Body(...), user: dict = Depends(requireAuth)):
 
     return JSONResponse(status_code=201, content=jsonable_encoder(response_data))
 
-@app.get("/secure/getOrganizationList")
-async def getOrganizationList(user: dict = Depends(requireAuth)):
-    # Only SUPER_ADMIN can fetch all organizations
-    if user.get("role") != "SUPER_ADMIN":
-        raise HTTPException(status_code=403, detail="Only SUPER_ADMIN can access organization list")
+@app.get("/secure/getOrganizationsList")
+async def getOrganizationsList(user: dict = Depends(requireAuth)):
+    role = user.get("role")
+    orgs = []
 
-    # Fetch only active organizations
-    cursor = orgsCol.find({"isActive": True}, {"organizationName": 1})
-    orgList = await cursor.to_list(None)
+    # --- Super Admin: full access ---
+    if role == "SUPER_ADMIN":
+        cursor = orgsCol.find({}, {"organizationName": 1})
+        async for org in cursor:
+            orgs.append({
+                "orgId": str(org["_id"]),
+                "organizationName": org["organizationName"]
+            })
 
-    result = [
-        {
-            "organizationId": str(org["_id"]),
-            "organizationName": org.get("organizationName")
-        }
-        for org in orgList
-    ]
+    # --- Super Admin Helper: only assigned orgs ---
+    elif role == "SUPER_HELPER":
+        accessible = user.get("accessibleOrganizations", [])
+        if not accessible:
+            raise HTTPException(status_code=403, detail="No organizations assigned")
+        cursor = orgsCol.find(
+            {"_id": {"$in": [ObjectId(o) for o in accessible]}},
+            {"organizationName": 1}
+        )
+        async for org in cursor:
+            orgs.append({
+                "orgId": str(org["_id"]),
+                "organizationName": org["organizationName"]
+            })
 
-    await logActivity(user, "View Organization List", f"Fetched {len(result)} organizations", "Success")
+    # --- HR Admin: only their org ---
+    elif role == "ORG_HR":
+        orgId = user.get("organizationId")
+        org = await orgsCol.find_one(
+            {"_id": ObjectId(orgId)},
+            {"organizationName": 1}
+        )
+        if org:
+            orgs.append({
+                "orgId": str(org["_id"]),
+                "organizationName": org["organizationName"]
+            })
+
+    else:
+        raise HTTPException(status_code=403, detail="Not authorized to access organizations")
+
+    await logActivity(
+        user,
+        "Fetched Organizations List",
+        f"Returned {len(orgs)} organizations for role {role}",
+        "Success"
+    )
 
     return JSONResponse(
         status_code=200,
-        content=jsonable_encoder({
-            "organizations": result,
-            "total": len(result)
-        })
+        content=jsonable_encoder({"organizations": orgs})
     )
+
 
 @app.get("/secure/getAllUsers")
 async def getAllUsers(user: dict = Depends(requireAuth)):
