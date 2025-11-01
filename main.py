@@ -564,6 +564,48 @@ async def getOrganizationList(user: dict = Depends(requireAuth)):
         })
     )
 
+@app.get("/secure/getAllUsers")
+async def getAllUsers(user: dict = Depends(requireAuth)):
+    role = user.get("role")
+
+    # Only SUPER_ADMIN or ORG_HR can access this endpoint
+    if role not in ["SUPER_ADMIN", "ORG_HR"]:
+        raise HTTPException(status_code=403, detail="Not authorized to view users")
+
+    query = {}
+    # HRs can see only their organization's users
+    if role == "ORG_HR":
+        query["organizationId"] = user.get("organizationId")
+
+    # Exclude sensitive fields
+    projection = {
+        "password": 0
+    }
+
+    cursor = usersCol.find(query, projection)
+    userList = await cursor.to_list(None)
+
+    # Convert ObjectIds and ensure consistent JSON
+    results = []
+    for u in userList:
+        u["_id"] = str(u["_id"])
+        results.append(u)
+
+    await logActivity(
+        user,
+        "View Users List",
+        f"Fetched {len(results)} users ({'all orgs' if role == 'SUPER_ADMIN' else 'own org'})",
+        "Success"
+    )
+
+    return JSONResponse(
+        status_code=200,
+        content=jsonable_encoder({
+            "totalUsers": len(results),
+            "users": results
+        })
+    )
+
 # -------------------------------
 # Fetch Activity Logs
 # -------------------------------
