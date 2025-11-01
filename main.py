@@ -9,6 +9,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from bson import ObjectId
 from fastapi.encoders import jsonable_encoder
 
+from bson.errors import InvalidId
+from datetime import datetime, timezone
+from fastapi import Body, Depends, HTTPException
+from fastapi.responses import JSONResponse
+
+from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi.responses import JSONResponse
+from datetime import datetime, timezone
+from bson import ObjectId
+from bson.errors import InvalidId
+import asyncio
+from apis import run_verification  # ← Import dummy verification dispatcher
+
 # -------------------------------
 # Config
 # -------------------------------
@@ -53,6 +66,7 @@ usersCol = db["users"]
 orgsCol = db["organizations"]
 verificationsCol = db["verifications"]
 activityLogsCol = db["activity_logs"]
+candidatesCol = db["candidates"] 
 
 # -------------------------------
 # Utility
@@ -78,6 +92,7 @@ async def logActivity(user: dict, action: str, details: str, status: str = "Succ
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
     await activityLogsCol.insert_one(logDoc)
+
 
 # -------------------------------
 # Models
@@ -326,65 +341,140 @@ async def getDashboard(user: dict = Depends(requireAuth)):
     role = user.get("role")
     orgId = user.get("organizationId")
 
+    # 🧩 Helper: Count verifications by stage activity (based on checks inside each stage)
+    async def stage_breakdown(query):
+        stages = ["primary", "secondary", "final"]
+        breakdown = {}
+        for stage in stages:
+            count = await verificationsCol.count_documents({
+                **query,
+                f"stages.{stage}.status": {"$in": ["IN_PROGRESS", "COMPLETED"]}
+            })
+            breakdown[stage] = count
+        return breakdown
+
+    # -------------------------
+    # SUPER ADMIN
+    # -------------------------
     if role == "SUPER_ADMIN":
         orgCount = await orgsCol.count_documents({})
         totalRequests = await verificationsCol.count_documents({})
-        ongoingCount = await verificationsCol.count_documents({"status": {"$in": ["PENDING", "IN_PROGRESS"]}})
-        completedCount = await verificationsCol.count_documents({"status": "COMPLETED"})
-        failedCount = await verificationsCol.count_documents({"status": "FAILED"})
+        ongoingCount = await verificationsCol.count_documents({"overallStatus": "IN_PROGRESS"})
+        completedCount = await verificationsCol.count_documents({"overallStatus": "COMPLETED"})
+        failedCount = await verificationsCol.count_documents({"overallStatus": "FAILED"})
+        stageStats = await stage_breakdown({})
 
         stats = {
             "totalOrganizations": orgCount,
             "totalRequests": totalRequests,
             "ongoingVerifications": ongoingCount,
             "completedVerifications": completedCount,
-            "failedVerifications": failedCount
+            "failedVerifications": failedCount,
+            "stageBreakdown": stageStats
         }
 
         await logActivity(user, "View Dashboard", "Super Admin viewed dashboard.", "Success")
-        return JSONResponse(status_code=200, content=jsonable_encoder({"role": "SUPER_ADMIN", "stats": stats}))
+        return JSONResponse(status_code=200, content=jsonable_encoder({
+            "role": "SUPER_ADMIN",
+            "stats": stats
+        }))
 
+    # -------------------------
+    # SUPER ADMIN HELPER
+    # -------------------------
+    elif role == "SUPER_ADMIN_HELPER":
+        accessible = user.get("accessibleOrganizations", [])
+        if not accessible:
+            raise HTTPException(status_code=403, detail="No organizations assigned")
+
+        orgQuery = {"organizationId": {"$in": accessible}}
+        totalRequests = await verificationsCol.count_documents(orgQuery)
+        ongoingCount = await verificationsCol.count_documents({**orgQuery, "overallStatus": "IN_PROGRESS"})
+        completedCount = await verificationsCol.count_documents({**orgQuery, "overallStatus": "COMPLETED"})
+        failedCount = await verificationsCol.count_documents({**orgQuery, "overallStatus": "FAILED"})
+        stageStats = await stage_breakdown(orgQuery)
+
+        stats = {
+            "accessibleOrganizations": len(accessible),
+            "totalRequests": totalRequests,
+            "ongoingVerifications": ongoingCount,
+            "completedVerifications": completedCount,
+            "failedVerifications": failedCount,
+            "stageBreakdown": stageStats
+        }
+
+        await logActivity(
+            user, "View Dashboard",
+            f"Super Admin Helper viewed dashboard for {len(accessible)} orgs.",
+            "Success"
+        )
+
+        return JSONResponse(status_code=200, content=jsonable_encoder({
+            "role": "SUPER_ADMIN_HELPER",
+            "stats": stats
+        }))
+
+    # -------------------------
+    # HR ADMIN
+    # -------------------------
     elif role == "ORG_HR":
         employeeCount = await usersCol.count_documents({
-        "organizationId": orgId,
-        "role": {"$in": ["ORG_HR", "HELPER", "EMPLOYEE"]},
-        "isActive": True
+            "organizationId": orgId,
+            "role": {"$in": ["ORG_HR", "HELPER", "EMPLOYEE"]},
+            "isActive": True
         })
 
-        totalRequests = await verificationsCol.count_documents({"organizationId": orgId})
-        ongoingCount = await verificationsCol.count_documents({"organizationId": orgId, "status": {"$in": ["PENDING", "IN_PROGRESS"]}})
-        completedCount = await verificationsCol.count_documents({"organizationId": orgId, "status": "COMPLETED"})
-        failedCount = await verificationsCol.count_documents({"organizationId": orgId, "status": "FAILED"})
+        orgQuery = {"organizationId": orgId}
+        totalRequests = await verificationsCol.count_documents(orgQuery)
+        ongoingCount = await verificationsCol.count_documents({**orgQuery, "overallStatus": "IN_PROGRESS"})
+        completedCount = await verificationsCol.count_documents({**orgQuery, "overallStatus": "COMPLETED"})
+        failedCount = await verificationsCol.count_documents({**orgQuery, "overallStatus": "FAILED"})
+        stageStats = await stage_breakdown(orgQuery)
 
         stats = {
             "totalEmployees": employeeCount,
             "totalRequests": totalRequests,
             "ongoingVerifications": ongoingCount,
             "completedVerifications": completedCount,
-            "failedVerifications": failedCount
+            "failedVerifications": failedCount,
+            "stageBreakdown": stageStats
         }
 
         await logActivity(user, "View Dashboard", f"ORG_HR viewed dashboard for org {orgId}.", "Success")
-        return JSONResponse(status_code=200, content=jsonable_encoder({"role": "ORG_HR", "stats": stats}))
+        return JSONResponse(status_code=200, content=jsonable_encoder({
+            "role": "ORG_HR",
+            "stats": stats
+        }))
 
-    elif role in ["EMPLOYEE", "HELPER"]:
+    # -------------------------
+    # HELPER / EMPLOYEE
+    # -------------------------
+    elif role in ["HELPER", "EMPLOYEE"]:
         userId = str(user["_id"])
-        totalRequests = await verificationsCol.count_documents({"verifiedByUserId": userId})
-        ongoingCount = await verificationsCol.count_documents({"verifiedByUserId": userId, "status": {"$in": ["PENDING", "IN_PROGRESS"]}})
-        completedCount = await verificationsCol.count_documents({"verifiedByUserId": userId, "status": "COMPLETED"})
-        failedCount = await verificationsCol.count_documents({"verifiedByUserId": userId, "status": "FAILED"})
+        userQuery = {"assignedTo": userId}
+        totalRequests = await verificationsCol.count_documents(userQuery)
+        ongoingCount = await verificationsCol.count_documents({**userQuery, "overallStatus": "IN_PROGRESS"})
+        completedCount = await verificationsCol.count_documents({**userQuery, "overallStatus": "COMPLETED"})
+        failedCount = await verificationsCol.count_documents({**userQuery, "overallStatus": "FAILED"})
+        stageStats = await stage_breakdown(userQuery)
 
         stats = {
             "totalAssigned": totalRequests,
             "ongoingVerifications": ongoingCount,
             "completedVerifications": completedCount,
-            "failedVerifications": failedCount
+            "failedVerifications": failedCount,
+            "stageBreakdown": stageStats
         }
 
-        await logActivity(user, "View Dashboard", "Helper viewed personal dashboard.", "Success")
-        return JSONResponse(status_code=200, content=jsonable_encoder({"role": role, "stats": stats}))
+        await logActivity(user, "View Dashboard", f"{role} viewed personal dashboard.", "Success")
+        return JSONResponse(status_code=200, content=jsonable_encoder({
+            "role": role,
+            "stats": stats
+        }))
 
-
+    # -------------------------
+    # FALLBACK
+    # -------------------------
     else:
         raise HTTPException(status_code=403, detail="Unknown role or not authorized")
 
@@ -859,6 +949,575 @@ async def getOrganizations(user: dict = Depends(requireAuth)):
         content=jsonable_encoder({
             "totalOrganizations": len(orgs),
             "organizations": orgs
+        })
+    )
+from fastapi import FastAPI, Body, Depends, HTTPException, Query
+
+# ----------------------------------------------------------
+# 📍 Get Candidates by Role / Organization Access Control
+# ----------------------------------------------------------
+@app.get("/secure/getCandidates")
+async def getCandidates(
+    orgId: Optional[str] = Query(None),
+    user: dict = Depends(requireAuth)
+):
+    role = user.get("role")
+    accessibleOrgs = user.get("accessibleOrganizations", [])
+    userOrgId = user.get("organizationId")
+
+    query = {}
+
+    # 🧩 SUPER ADMIN → all candidates or specific org if provided
+    if role == "SUPER_ADMIN":
+        if orgId:
+            query["organizationId"] = orgId
+        # else: no filter → get all candidates
+
+    # 🧩 SUPER ADMIN HELPER → only assigned orgs
+    elif role == "SUPER_ADMIN_HELPER":
+        if orgId:
+            if orgId not in accessibleOrgs:
+                await logActivity(
+                    user,
+                    "Unauthorized Attempt",
+                    f"Tried accessing candidates of unauthorized org {orgId}",
+                    "Error"
+                )
+                raise HTTPException(status_code=403, detail="You are not authorized for this organization")
+            query["organizationId"] = orgId
+        else:
+            query["organizationId"] = {"$in": accessibleOrgs}
+
+    # 🧩 ORG_HR / HELPER → only their own organization
+    elif role in ["ORG_HR", "HELPER"]:
+        if not userOrgId:
+            raise HTTPException(status_code=400, detail="Organization ID missing in user profile")
+        query["organizationId"] = userOrgId
+
+    else:
+        raise HTTPException(status_code=403, detail="You are not authorized to view candidates")
+
+    # 🔍 Fetch candidates
+    candidates_cursor = candidatesCol.find(query)
+    candidates = []
+    async for c in candidates_cursor:
+        c["_id"] = str(c["_id"])
+        candidates.append(c)
+
+    # 🧾 Log the access
+    await logActivity(
+        user,
+        "View Candidates",
+        f"{user.get('email')} viewed {len(candidates)} candidates "
+        f"{'for org ' + orgId if orgId else '(all accessible orgs)'}",
+        "Success"
+    )
+
+    # ✅ Response
+    return JSONResponse(
+        status_code=200,
+        content=jsonable_encoder({
+            "total": len(candidates),
+            "candidates": candidates
+        })
+    )
+
+
+# Assuming these exist in your environment
+# from your_project.auth import requireAuth
+# from your_project.db import candidatesCol, verificationsCol, orgsCol
+# from your_project.utils import logActivity
+
+@app.post("/secure/initiateVerification")
+async def initiateVerification(body: dict = Body(...), user: dict = Depends(requireAuth)):
+    role = user.get("role")
+    candidateId = body.get("candidateId")
+    stages = body.get("stages", {})
+
+    if not candidateId:
+        raise HTTPException(status_code=400, detail="Candidate ID is required")
+
+    # ✅ Validate Candidate ID
+    try:
+        candidateObjId = ObjectId(candidateId)
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="Invalid Candidate ID format")
+
+    # --- Fetch Candidate ---
+    candidate = await candidatesCol.find_one({"_id": candidateObjId})
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    # --- Determine Organization Logic Based on Role ---
+    organizationId = None
+    organizationName = None
+
+    # 🧩 SUPER ADMIN
+    if role == "SUPER_ADMIN":
+        organizationId = body.get("organizationId") or candidate.get("organizationId")
+        if not organizationId:
+            raise HTTPException(status_code=400, detail="Organization ID required for Super Admin")
+        org = await orgsCol.find_one({"_id": ObjectId(organizationId)})
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        organizationName = org.get("organizationName")
+
+    # 🧩 SUPER ADMIN HELPER
+    elif role == "SUPER_ADMIN_HELPER":
+        accessible = user.get("accessibleOrganizations", [])
+        organizationId = body.get("organizationId") or candidate.get("organizationId")
+        if not organizationId:
+            raise HTTPException(status_code=400, detail="Organization ID required")
+        if organizationId not in accessible:
+            await logActivity(
+                user,
+                "Unauthorized Attempt",
+                f"Tried initiating verification for unauthorized org {organizationId}",
+                "Error"
+            )
+            raise HTTPException(status_code=403, detail="Not authorized for this organization")
+        org = await orgsCol.find_one({"_id": ObjectId(organizationId)})
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        organizationName = org.get("organizationName")
+
+    # 🧩 ORG HR or HELPER
+    elif role in ["ORG_HR", "HELPER"]:
+        organizationId = user.get("organizationId")
+
+        # ✅ Ensure candidate belongs to same org
+        if candidate.get("organizationId") != organizationId:
+            await logActivity(
+                user,
+                "Unauthorized Attempt",
+                f"Tried initiating verification for candidate {candidateId} "
+                f"from different org {candidate.get('organizationId')}",
+                "Error"
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="You cannot initiate verification for candidates outside your organization"
+            )
+
+        org = await orgsCol.find_one({"_id": ObjectId(organizationId)})
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        organizationName = org.get("organizationName")
+
+    else:
+        raise HTTPException(status_code=403, detail="You are not authorized to initiate verifications")
+
+    # ---------------------------------------------------------------------
+    # 🔍 Enhanced check for existing verification (Retry / Completed logic)
+    # ---------------------------------------------------------------------
+    existing = await verificationsCol.find_one({"candidateId": candidateId, "organizationId": organizationId})
+    if existing:
+        existing_status = existing.get("overallStatus")
+        if existing_status == "COMPLETED":
+            return JSONResponse(
+                status_code=200,
+                content={"message": "Verification already completed successfully"}
+            )
+        elif existing_status == "IN_PROGRESS":
+            return JSONResponse(
+                status_code=200,
+                content={"message": "Verification already in progress"}
+            )
+        elif existing_status == "FAILED":
+            # re-run only failed checks
+            failed_checks = []
+            for stage_name, checks in existing["stages"].items():
+                for check in checks:
+                    if check["status"] == "FAILED":
+                        failed_checks.append((stage_name, check["check"]))
+
+            if not failed_checks:
+                return JSONResponse(status_code=200, content={"message": "No failed checks to retry"})
+
+            asyncio.create_task(retry_failed_checks(existing, failed_checks, candidate, user))
+            return JSONResponse(
+                status_code=202,
+                content={"message": f"Re-attempting {len(failed_checks)} failed checks"}
+            )
+
+    # ✅ Prevent Duplicate Verification (existing unfinished)
+    existingVerification = await verificationsCol.find_one({
+        "candidateId": candidateId,
+        "organizationId": organizationId,
+        "overallStatus": {"$in": ["IN_PROGRESS", "PENDING"]}
+    })
+    if existingVerification:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Verification already exists for this candidate under {organizationName}."
+        )
+
+    # --- Helper for Building Checks ---
+    def buildChecks(stageList):
+        return [{"check": c, "status": "NOT_STARTED", "remarks": None} for c in stageList]
+
+    primaryChecks = buildChecks(stages.get("primary", []))
+    secondaryChecks = buildChecks(stages.get("secondary", []))
+    finalChecks = buildChecks(stages.get("final", []))
+
+    # --- Verification Document ---
+    verificationDoc = {
+        "candidateId": candidateId,
+        "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
+        "organizationId": organizationId,
+        "organizationName": organizationName,
+        "initiatedBy": user.get("email"),
+        "initiatedAt": datetime.now(timezone.utc).isoformat(),
+        "stages": {
+            "primary": primaryChecks,
+            "secondary": secondaryChecks,
+            "final": finalChecks
+        },
+        "currentStage": "primary",
+        "overallStatus": "IN_PROGRESS",
+        "assignedTo": str(user.get("_id")),
+        "remarks": []
+    }
+
+    result = await verificationsCol.insert_one(verificationDoc)
+
+    # --- Update Candidate Status ---
+    await candidatesCol.update_one(
+        {"_id": candidateObjId},
+        {"$set": {"status": "IN_PROGRESS"}}
+    )
+
+    # --- Log Activity ---
+    await logActivity(
+        user,
+        "Initiated Verification",
+        f"{user.get('email')} initiated verification for {candidate.get('firstName')} ({organizationName})",
+        "Success"
+    )
+
+    # -------------------------------------------------------------------------
+    # 🚀 BACKGROUND VERIFICATION EXECUTION PIPELINE (Stop on Failure)
+    # -------------------------------------------------------------------------
+    async def process_verification_pipeline(verification_id, candidate, stages):
+        """Sequentially process all verification checks using dummy APIs. Stops if a stage fails."""
+        try:
+            stage_order = ["primary", "secondary", "final"]
+            for stage_name in stage_order:
+                checks = stages.get(stage_name, [])
+                if not checks:
+                    continue
+
+                # Mark stage as active
+                await verificationsCol.update_one(
+                    {"_id": ObjectId(verification_id)},
+                    {"$set": {"currentStage": stage_name}}
+                )
+
+                for check in checks:
+                    check_name = check["check"]
+                    # Mark check as in progress
+                    await verificationsCol.update_one(
+                        {"_id": ObjectId(verification_id), f"stages.{stage_name}.check": check_name},
+                        {"$set": {f"stages.{stage_name}.$.status": "IN_PROGRESS"}}
+                    )
+
+                    # Run dummy API
+                    status, remarks = await run_verification(check_name, candidate)
+
+                    # Update result
+                    await verificationsCol.update_one(
+                        {"_id": ObjectId(verification_id), f"stages.{stage_name}.check": check_name},
+                        {"$set": {
+                            f"stages.{stage_name}.$.status": status,
+                            f"stages.{stage_name}.$.remarks": remarks
+                        }}
+                    )
+
+                    # Stop immediately if a check fails
+                    if status == "FAILED":
+                        fail_tag = f"{stage_name}_{check_name}"
+                        await verificationsCol.update_one(
+                            {"_id": ObjectId(verification_id)},
+                            {"$set": {
+                                "overallStatus": "FAILED",
+                                "failureStage": fail_tag,
+                                "currentStage": stage_name
+                            }}
+                        )
+                        await candidatesCol.update_one(
+                            {"_id": candidateObjId},
+                            {"$set": {"status": f"FAILED_AT_{fail_tag.upper()}"}}
+                        )
+                        await logActivity(
+                            user,
+                            "Verification Failed",
+                            f"Verification stopped at {fail_tag} for {candidate.get('firstName')}",
+                            "Error"
+                        )
+                        return  # ❌ stop pipeline here
+
+                # Small delay between stages
+                await asyncio.sleep(2)
+
+            # If reached here, all passed
+            await verificationsCol.update_one(
+                {"_id": ObjectId(verification_id)},
+                {"$set": {
+                    "overallStatus": "COMPLETED",
+                    "currentStage": "final",
+                    "completedAt": datetime.now(timezone.utc).isoformat()
+                }}
+            )
+
+            # ✅ Reset candidate status to VERIFIED (even if previously failed)
+            await candidatesCol.update_one(
+                {"_id": candidateObjId},
+                {"$set": {"status": "VERIFIED"}}
+            )
+
+            await logActivity(
+                user,
+                "Verification Completed",
+                f"All stages passed for {candidate.get('firstName')} ({organizationName})",
+                "Success"
+            )
+
+        except Exception as e:
+            await verificationsCol.update_one(
+                {"_id": ObjectId(verification_id)},
+                {"$set": {"overallStatus": "FAILED", "error": str(e)}}
+            )
+            await candidatesCol.update_one(
+                {"_id": candidateObjId},
+                {"$set": {"status": "FAILED_UNKNOWN_ERROR"}}
+            )
+            await logActivity(
+                user,
+                "Verification Failed",
+                f"Error during verification pipeline: {str(e)}",
+                "Error"
+            )
+
+    # 🔄 Run background task
+    asyncio.create_task(process_verification_pipeline(result.inserted_id, candidate, verificationDoc["stages"]))
+
+    # --- Response ---
+    return JSONResponse(
+        status_code=201,
+        content=jsonable_encoder({
+            "message": "Verification initiated successfully",
+            "verificationId": str(result.inserted_id),
+            "candidate": {
+                "id": candidateId,
+                "name": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip()
+            },
+            "organization": {
+                "id": organizationId,
+                "name": organizationName
+            },
+            "initiatedBy": user.get("email"),
+            "stages": verificationDoc["stages"],
+            "status": "IN_PROGRESS"
+        })
+    )
+
+
+# -------------------------------------------------------------------------
+# ♻️ Helper: Retry only failed checks (added safely at the end)
+# -------------------------------------------------------------------------
+async def retry_failed_checks(verification, failed_checks, candidate, user):
+    verification_id = verification["_id"]
+    try:
+        for stage_name, check_name in failed_checks:
+            await verificationsCol.update_one(
+                {"_id": verification_id, f"stages.{stage_name}.check": check_name},
+                {"$set": {f"stages.{stage_name}.$.status": "IN_PROGRESS"}}
+            )
+            status, remarks = await run_verification(check_name, candidate)
+            await verificationsCol.update_one(
+                {"_id": verification_id, f"stages.{stage_name}.check": check_name},
+                {"$set": {
+                    f"stages.{stage_name}.$.status": status,
+                    f"stages.{stage_name}.$.remarks": remarks
+                }}
+            )
+
+        # Check again for remaining failures
+        verification = await verificationsCol.find_one({"_id": verification_id})
+        failed_any = any(
+            check["status"] == "FAILED"
+            for stage in verification["stages"].values()
+            for check in stage
+        )
+
+        final_status = "FAILED" if failed_any else "COMPLETED"
+        await verificationsCol.update_one(
+            {"_id": verification_id},
+            {"$set": {"overallStatus": final_status}}
+        )
+
+        await logActivity(
+            user,
+            "Retry Verification",
+            f"Reattempted failed checks for candidate {verification['candidateName']}",
+            "Success" if final_status == "COMPLETED" else "Error"
+        )
+
+    except Exception as e:
+        await logActivity(user, "Retry Verification Error", str(e), "Error")
+
+
+
+from apis import process_verification_record  # ✅ import the correct async worker
+from bson import ObjectId
+
+@app.post("/secure/resumePendingVerifications")
+async def resumePendingVerifications(user: dict = Depends(requireAuth)):
+    """Resume all pending or in-progress verifications."""
+    if user.get("role") not in ["SUPER_ADMIN", "SUPER_ADMIN_HELPER"]:
+        raise HTTPException(status_code=403, detail="Not authorized to resume verifications")
+
+    pending_cursor = verificationsCol.find({"overallStatus": {"$in": ["IN_PROGRESS", "PENDING"]}})
+    count = 0
+
+    async for verification in pending_cursor:
+        # Ensure candidate exists
+        candidate = await candidatesCol.find_one({"_id": ObjectId(verification["candidateId"])})
+        if not candidate:
+            continue
+
+        # Relaunch background worker
+        asyncio.create_task(process_verification_record(verification))
+        count += 1
+
+    if count == 0:
+        return {"message": "No pending verifications found"}
+
+    return {"message": f"Resumed {count} pending verifications"}
+
+
+@app.post("/secure/addCandidate")
+async def addCandidate(body: dict = Body(...), user: dict = Depends(requireAuth)):
+    role = user.get("role")
+    creatorEmail = user.get("email")
+    accessibleOrgs = user.get("accessibleOrganizations", [])
+    orgId = None
+    orgName = None
+
+    # --- Extract fields from body ---
+    firstName = body.get("firstName")
+    middleName = body.get("middleName")
+    lastName = body.get("lastName")
+    phone = body.get("phone")
+    aadhaarNumber = body.get("aadhaarNumber")
+    panNumber = body.get("panNumber")
+    address = body.get("address")
+    inputOrgId = body.get("organizationId")
+
+    # --- Basic validations ---
+    if not all([firstName, lastName, phone, aadhaarNumber, panNumber, address]):
+        raise HTTPException(status_code=400, detail="Missing required candidate details")
+
+    # --- Access control by role ---
+
+    # 1️⃣ SUPER_ADMIN → can add to any org (must specify orgId)
+    if role == "SUPER_ADMIN":
+        orgId = inputOrgId or user.get("organizationId")
+        if not orgId:
+            raise HTTPException(status_code=400, detail="Organization ID required for Super Admin")
+        org = await orgsCol.find_one({"_id": ObjectId(orgId)})
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        orgName = org.get("organizationName")
+
+    # 2️⃣ SUPER_ADMIN_HELPER → only assigned orgs
+    elif role == "SUPER_ADMIN_HELPER":
+        if not inputOrgId:
+            raise HTTPException(status_code=400, detail="Organization ID required")
+        if inputOrgId not in accessibleOrgs:
+            await logActivity(
+                user,
+                "Unauthorized Attempt",
+                f"Tried adding candidate to unauthorized org {inputOrgId}",
+                "Error"
+            )
+            raise HTTPException(status_code=403, detail="You are not authorized for this organization")
+        org = await orgsCol.find_one({"_id": ObjectId(inputOrgId)})
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        orgId = inputOrgId
+        orgName = org.get("organizationName")
+
+    # 3️⃣ ORG_HR / HELPER → only their own org
+    elif role in ["ORG_HR", "HELPER"]:
+        # Prevent attempts to override orgId
+        if body.get("organizationId") and body.get("organizationId") != user.get("organizationId"):
+            await logActivity(
+                user,
+                "Unauthorized Attempt",
+                f"Tried adding candidate to another organization ({body.get('organizationId')})",
+                "Error"
+            )
+            raise HTTPException(status_code=403, detail="You cannot add candidates to other organizations")
+
+        orgId = user.get("organizationId")
+        org = await orgsCol.find_one({"_id": ObjectId(orgId)})
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        orgName = org.get("organizationName")
+
+    # 4️⃣ Everyone else — denied
+    else:
+        raise HTTPException(status_code=403, detail="Not authorized to add candidates")
+
+    # --- Prevent duplicate candidate (same Aadhaar or PAN within same org) ---
+    existing = await candidatesCol.find_one({
+        "organizationId": orgId,
+        "$or": [
+            {"aadhaarNumber": aadhaarNumber},
+            {"panNumber": panNumber}
+        ]
+    })
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Candidate with Aadhaar/PAN already exists in {orgName}"
+        )
+
+    # --- Create candidate document ---
+    now = datetime.now(timezone.utc).isoformat()
+    candidateDoc = {
+        "firstName": firstName,
+        "middleName": middleName,
+        "lastName": lastName,
+        "phone": phone,
+        "aadhaarNumber": aadhaarNumber,
+        "panNumber": panNumber,
+        "address": address,
+        "organizationId": orgId,
+        "organizationName": orgName,
+        "status": "PENDING",
+        "createdAt": now,
+        "createdBy": creatorEmail
+    }
+
+    result = await candidatesCol.insert_one(candidateDoc)
+    candidateDoc["_id"] = str(result.inserted_id)
+
+    # --- Log success ---
+    await logActivity(
+        user,
+        "Add Candidate",
+        f"{creatorEmail} added candidate {firstName} {lastName} to {orgName}",
+        "Success"
+    )
+
+    # --- Response ---
+    return JSONResponse(
+        status_code=201,
+        content=jsonable_encoder({
+            "message": "Candidate added successfully",
+            "candidate": candidateDoc
         })
     )
 
