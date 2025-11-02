@@ -1170,6 +1170,282 @@ async def getCandidates(
 # from your_project.db import candidatesCol, verificationsCol, orgsCol
 # from your_project.utils import logActivity
 
+# -------------------------------------------------------------------------
+# 🚀 GLOBAL PIPELINE FUNCTION (moved outside so it’s accessible everywhere)
+# -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+# 🚀 GLOBAL PIPELINE FUNCTION (accessible everywhere)
+# -------------------------------------------------------------------------
+async def process_verification_pipeline(verification_id, candidate, stages):
+    """
+    Run all verification checks stage-by-stage (primary -> secondary -> final).
+    - Skips checks already COMPLETED
+    - Starts from the first stage that has any check not COMPLETED
+    - Stops immediately on first FAILURE and marks overallStatus=FAILED
+    - If everything passes, marks overallStatus=COMPLETED and candidate=VERIFIED
+    """
+    try:
+        # Normalize verification_id to ObjectId
+        verification_oid = verification_id if isinstance(verification_id, ObjectId) else ObjectId(verification_id)
+
+        # Candidate ObjectId
+        candidateObjId = None
+        if isinstance(candidate.get("_id"), ObjectId):
+            candidateObjId = candidate["_id"]
+        elif candidate.get("_id"):
+            candidateObjId = ObjectId(candidate["_id"])
+        elif candidate.get("id"):
+            candidateObjId = ObjectId(candidate["id"])
+
+        organizationName = candidate.get("organizationName", "Unknown")
+
+        stage_order = ["primary", "secondary", "final"]
+
+        # Helper: find first stage that has any check not COMPLETED
+        def first_incomplete_stage(_stages: dict) -> Optional[str]:
+            for stg in stage_order:
+                checks = _stages.get(stg, [])
+                if any(ch.get("status") != "COMPLETED" for ch in checks):
+                    return stg
+            return None  # everything done
+
+        # If caller passed a stale "stages", fetch fresh from DB to avoid drift
+        ver_doc = await verificationsCol.find_one({"_id": verification_oid})
+        if ver_doc and "stages" in ver_doc:
+            stages = ver_doc["stages"]
+
+        start_stage = first_incomplete_stage(stages)
+        if start_stage is None:
+            # Nothing left to do
+            await verificationsCol.update_one(
+                {"_id": verification_oid},
+                {"$set": {"overallStatus": "COMPLETED", "currentStage": "final"}}
+            )
+            if candidateObjId:
+                await candidatesCol.update_one(
+                    {"_id": candidateObjId},
+                    {"$set": {"status": "VERIFIED"}}
+                )
+            await logActivity(
+                {"email": "system"},
+                "Verification Completed",
+                f"All stages already passed for {candidate.get('firstName')} ({organizationName})",
+                "Success"
+            )
+            return
+
+        # Walk from the first incomplete stage through to the end
+        start_index = stage_order.index(start_stage)
+        for stage_name in stage_order[start_index:]:
+            checks = stages.get(stage_name, []) or []
+
+            # Mark stage as active
+            await verificationsCol.update_one(
+                {"_id": verification_oid},
+                {"$set": {"currentStage": stage_name}}
+            )
+
+            for check in checks:
+                check_name = check["check"]
+                current_status = (check.get("status") or "NOT_STARTED").upper()
+
+                # ✅ Skip already completed checks
+                if current_status == "COMPLETED":
+                    continue
+
+                # Mark check as in progress
+                await verificationsCol.update_one(
+                    {"_id": verification_oid, f"stages.{stage_name}.check": check_name},
+                    {"$set": {f"stages.{stage_name}.$.status": "IN_PROGRESS"}}
+                )
+
+                # Run verification
+                status, remarks = await run_verification(check_name, candidate)
+
+                # Update result
+                await verificationsCol.update_one(
+                    {"_id": verification_oid, f"stages.{stage_name}.check": check_name},
+                    {"$set": {
+                        f"stages.{stage_name}.$.status": status,
+                        f"stages.{stage_name}.$.remarks": remarks
+                    }}
+                )
+
+                # Stop immediately if a check fails
+                if status == "FAILED":
+                    fail_tag = f"{stage_name}_{check_name}"
+                    await verificationsCol.update_one(
+                        {"_id": verification_oid},
+                        {"$set": {
+                            "overallStatus": "FAILED",
+                            "failureStage": fail_tag,
+                            "currentStage": stage_name
+                        }}
+                    )
+                    if candidateObjId:
+                        await candidatesCol.update_one(
+                            {"_id": candidateObjId},
+                            {"$set": {"status": f"FAILED_AT_{fail_tag.upper()}"}}
+                        )
+                    await logActivity(
+                        {"email": "system"},
+                        "Verification Failed",
+                        f"Verification stopped at {fail_tag} for {candidate.get('firstName')}",
+                        "Error"
+                    )
+                    return  # ❌ stop pipeline here
+
+            # Small delay between stages (simulate queue)
+            await asyncio.sleep(2)
+
+        # If reached here, all checks in all stages are COMPLETED
+        await verificationsCol.update_one(
+            {"_id": verification_oid},
+            {"$set": {"overallStatus": "COMPLETED", "currentStage": "final"}}
+        )
+        if candidateObjId:
+            await candidatesCol.update_one(
+                {"_id": candidateObjId},
+                {"$set": {"status": "VERIFIED"}}
+            )
+        await logActivity(
+            {"email": "system"},
+            "Verification Completed",
+            f"All stages passed for {candidate.get('firstName')} ({organizationName})",
+            "Success"
+        )
+
+    except Exception as e:
+        # Best-effort failure wrap
+        try:
+            verification_oid = verification_id if isinstance(verification_id, ObjectId) else ObjectId(verification_id)
+            await verificationsCol.update_one(
+                {"_id": verification_oid},
+                {"$set": {"overallStatus": "FAILED", "error": str(e)}}
+            )
+        finally:
+            pass
+        # Candidate set to unknown failure (best-effort)
+        try:
+            if candidate.get("_id"):
+                cid = candidate["_id"] if isinstance(candidate["_id"], ObjectId) else ObjectId(candidate["_id"])
+                await candidatesCol.update_one(
+                    {"_id": cid},
+                    {"$set": {"status": "FAILED_UNKNOWN_ERROR"}}
+                )
+        finally:
+            pass
+        await logActivity(
+            {"email": "system"},
+            "Verification Failed",
+            f"Error during verification pipeline: {str(e)}",
+            "Error"
+        )
+
+
+# -------------------------------------------------------------------------
+# ♻️ Retry only failed checks (auto-resume pipeline if all pass)
+# -------------------------------------------------------------------------
+async def retry_failed_checks(verification, failed_checks, candidate, user):
+    """
+    - Retries exactly the failed checks.
+    - If any still fail -> overallStatus=FAILED and candidate status updated.
+    - If all pass -> overallStatus=IN_PROGRESS and pipeline resumes from the first incomplete stage.
+    """
+    try:
+        verification_oid = verification["_id"] if isinstance(verification["_id"], ObjectId) else ObjectId(verification["_id"])
+
+        # 1) Retry all failed checks
+        for stage_name, check_name in failed_checks:
+            # Mark as in progress
+            await verificationsCol.update_one(
+                {"_id": verification_oid, f"stages.{stage_name}.check": check_name},
+                {"$set": {f"stages.{stage_name}.$.status": "IN_PROGRESS"}}
+            )
+
+            # Run verification again
+            status, remarks = await run_verification(check_name, candidate)
+
+            # Update result
+            await verificationsCol.update_one(
+                {"_id": verification_oid, f"stages.{stage_name}.check": check_name},
+                {"$set": {
+                    f"stages.{stage_name}.$.status": status,
+                    f"stages.{stage_name}.$.remarks": remarks
+                }}
+            )
+
+        # 2) Fetch latest verification after retries
+        updated_verification = await verificationsCol.find_one({"_id": verification_oid})
+
+        # 3) Check if any still failed
+        failed_any = any(
+            ch.get("status") == "FAILED"
+            for stg in ["primary", "secondary", "final"]
+            for ch in (updated_verification["stages"].get(stg, []) or [])
+        )
+
+        if failed_any:
+            # Still some failures
+            await verificationsCol.update_one(
+                {"_id": verification_oid},
+                {"$set": {"overallStatus": "FAILED"}}
+            )
+            # Best-effort candidate mark
+            try:
+                cid = updated_verification.get("candidateId")
+                if cid:
+                    await candidatesCol.update_one(
+                        {"_id": ObjectId(cid)},
+                        {"$set": {"status": "FAILED_RETRY"}}
+                    )
+            finally:
+                pass
+            await logActivity(
+                user,
+                "Retry Verification",
+                f"Reattempted checks failed again for {updated_verification.get('candidateName')}",
+                "Error"
+            )
+            return
+
+        # 4) All failed checks passed -> Resume the pipeline from first incomplete stage
+        await verificationsCol.update_one(
+            {"_id": verification_oid},
+            {"$set": {"overallStatus": "IN_PROGRESS", "failureStage": None}}
+        )
+
+        # Fetch fresh candidate (ObjectId-safe)
+        fresh_candidate = candidate
+        try:
+            if not candidate.get("_id") and updated_verification.get("candidateId"):
+                fresh_candidate = await candidatesCol.find_one({"_id": ObjectId(updated_verification["candidateId"])})
+        except Exception:
+            pass
+
+        await logActivity(
+            user,
+            "Retry Verification Success",
+            f"All failed checks fixed for {updated_verification.get('candidateName')}, resuming pipeline...",
+            "Success"
+        )
+
+        # Resume pipeline with the DB's current stages snapshot
+        asyncio.create_task(
+            process_verification_pipeline(
+                verification_oid,
+                fresh_candidate or candidate,
+                updated_verification["stages"]
+            )
+        )
+
+    except Exception as e:
+        await logActivity(user, "Retry Verification Error", str(e), "Error")
+
+
+# -------------------------------------------------------------------------
+# 🚦 Initiate Verification (your original function — unchanged)
+# -------------------------------------------------------------------------
 @app.post("/secure/initiateVerification")
 async def initiateVerification(body: dict = Body(...), user: dict = Depends(requireAuth)):
     role = user.get("role")
@@ -1337,103 +1613,7 @@ async def initiateVerification(body: dict = Body(...), user: dict = Depends(requ
         "Success"
     )
 
-    # -------------------------------------------------------------------------
-    # 🚀 BACKGROUND VERIFICATION EXECUTION PIPELINE (Stop on Failure)
-    # -------------------------------------------------------------------------
-    async def process_verification_pipeline(verification_id, candidate, stages):
-        """Sequentially process all verification checks using dummy APIs. Stops if a stage fails."""
-        try:
-            stage_order = ["primary", "secondary", "final"]
-            for stage_name in stage_order:
-                checks = stages.get(stage_name, [])
-                if not checks:
-                    continue
-
-                # Mark stage as active
-                await verificationsCol.update_one(
-                    {"_id": ObjectId(verification_id)},
-                    {"$set": {"currentStage": stage_name}}
-                )
-
-                for check in checks:
-                    check_name = check["check"]
-                    # Mark check as in progress
-                    await verificationsCol.update_one(
-                        {"_id": ObjectId(verification_id), f"stages.{stage_name}.check": check_name},
-                        {"$set": {f"stages.{stage_name}.$.status": "IN_PROGRESS"}}
-                    )
-
-                    # Run dummy API
-                    status, remarks = await run_verification(check_name, candidate)
-
-                    # Update result
-                    await verificationsCol.update_one(
-                        {"_id": ObjectId(verification_id), f"stages.{stage_name}.check": check_name},
-                        {"$set": {
-                            f"stages.{stage_name}.$.status": status,
-                            f"stages.{stage_name}.$.remarks": remarks
-                        }}
-                    )
-
-                    # Stop immediately if a check fails
-                    if status == "FAILED":
-                        fail_tag = f"{stage_name}_{check_name}"
-                        await verificationsCol.update_one(
-                            {"_id": ObjectId(verification_id)},
-                            {"$set": {
-                                "overallStatus": "FAILED",
-                                "failureStage": fail_tag,
-                                "currentStage": stage_name
-                            }}
-                        )
-                        await candidatesCol.update_one(
-                            {"_id": candidateObjId},
-                            {"$set": {"status": f"FAILED_AT_{fail_tag.upper()}"}}
-                        )
-                        await logActivity(
-                            user,
-                            "Verification Failed",
-                            f"Verification stopped at {fail_tag} for {candidate.get('firstName')}",
-                            "Error"
-                        )
-                        return  # ❌ stop pipeline here
-
-                # Small delay between stages
-                await asyncio.sleep(2)
-
-            # If reached here, all passed
-            await verificationsCol.update_one(
-                {"_id": ObjectId(verification_id)},
-                {"$set": {"overallStatus": "COMPLETED", "currentStage": "final"}}
-            )
-            await candidatesCol.update_one(
-                {"_id": candidateObjId},
-                {"$set": {"status": "VERIFIED"}}
-            )
-            await logActivity(
-                user,
-                "Verification Completed",
-                f"All stages passed for {candidate.get('firstName')} ({organizationName})",
-                "Success"
-            )
-
-        except Exception as e:
-            await verificationsCol.update_one(
-                {"_id": ObjectId(verification_id)},
-                {"$set": {"overallStatus": "FAILED", "error": str(e)}}
-            )
-            await candidatesCol.update_one(
-                {"_id": candidateObjId},
-                {"$set": {"status": "FAILED_UNKNOWN_ERROR"}}
-            )
-            await logActivity(
-                user,
-                "Verification Failed",
-                f"Error during verification pipeline: {str(e)}",
-                "Error"
-            )
-
-    # 🔄 Run background task
+    # 🔄 Run background task (calls global pipeline)
     asyncio.create_task(process_verification_pipeline(result.inserted_id, candidate, verificationDoc["stages"]))
 
     # --- Response ---
@@ -1457,49 +1637,6 @@ async def initiateVerification(body: dict = Body(...), user: dict = Depends(requ
     )
 
 
-# -------------------------------------------------------------------------
-# ♻️ Helper: Retry only failed checks (added safely at the end)
-# -------------------------------------------------------------------------
-async def retry_failed_checks(verification, failed_checks, candidate, user):
-    verification_id = verification["_id"]
-    try:
-        for stage_name, check_name in failed_checks:
-            await verificationsCol.update_one(
-                {"_id": verification_id, f"stages.{stage_name}.check": check_name},
-                {"$set": {f"stages.{stage_name}.$.status": "IN_PROGRESS"}}
-            )
-            status, remarks = await run_verification(check_name, candidate)
-            await verificationsCol.update_one(
-                {"_id": verification_id, f"stages.{stage_name}.check": check_name},
-                {"$set": {
-                    f"stages.{stage_name}.$.status": status,
-                    f"stages.{stage_name}.$.remarks": remarks
-                }}
-            )
-
-        # Check again for remaining failures
-        verification = await verificationsCol.find_one({"_id": verification_id})
-        failed_any = any(
-            check["status"] == "FAILED"
-            for stage in verification["stages"].values()
-            for check in stage
-        )
-
-        final_status = "FAILED" if failed_any else "COMPLETED"
-        await verificationsCol.update_one(
-            {"_id": verification_id},
-            {"$set": {"overallStatus": final_status}}
-        )
-
-        await logActivity(
-            user,
-            "Retry Verification",
-            f"Reattempted failed checks for candidate {verification['candidateName']}",
-            "Success" if final_status == "COMPLETED" else "Error"
-        )
-
-    except Exception as e:
-        await logActivity(user, "Retry Verification Error", str(e), "Error")
 
 
 
