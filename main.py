@@ -951,6 +951,148 @@ async def getOrganizations(user: dict = Depends(requireAuth)):
             "organizations": orgs
         })
     )
+
+from fastapi import Query
+import math
+
+@app.get("/secure/getVerifications")
+async def getVerifications(
+    candidateId: Optional[str] = Query(None),
+    user: dict = Depends(requireAuth)
+):
+    """
+    Fetch verification details and per-candidate progress summary.
+    - If candidateId provided: only that candidate
+    - Else: all verifications accessible to logged-in user
+    Includes progress % and per-candidate completion stats.
+    """
+    role = user.get("role")
+    accessibleOrgs = user.get("accessibleOrganizations", [])
+    userOrgId = user.get("organizationId")
+    userEmail = user.get("email")
+
+    query = {}
+
+    # 🔍 Filter by specific candidate if provided
+    if candidateId:
+        query["candidateId"] = candidateId
+
+    # 🧩 Role-based access control
+    if role == "SUPER_ADMIN":
+        pass
+
+    elif role == "SUPER_ADMIN_HELPER":
+        if not accessibleOrgs:
+            raise HTTPException(status_code=403, detail="No organizations assigned")
+        query["organizationId"] = {"$in": accessibleOrgs}
+
+    elif role == "ORG_HR":
+        if not userOrgId:
+            raise HTTPException(status_code=400, detail="Organization ID missing")
+        query["organizationId"] = userOrgId
+
+    elif role == "HELPER":
+        query["initiatedBy"] = userEmail
+
+    else:
+        raise HTTPException(status_code=403, detail="Not authorized to view verifications")
+
+    # --------------------------------------------
+    # 🧾 Fetch verification records
+    # --------------------------------------------
+    verifications_cursor = verificationsCol.find(query).sort("initiatedAt", -1)
+    verifications = []
+    candidateSummaries = {}
+
+    totalCompletedChecks = 0
+    totalAssignedChecks = 0
+
+    async for v in verifications_cursor:
+        v["_id"] = str(v["_id"])
+        v["candidateId"] = str(v["candidateId"])
+
+        # 🧮 Compute stage-wise check stats
+        totalChecks = 0
+        completedChecks = 0
+        failedChecks = 0
+        inProgressChecks = 0
+
+        for stage_name, checks in v.get("stages", {}).items():
+            for check in checks:
+                totalChecks += 1
+                status = check.get("status", "NOT_STARTED")
+                if status == "COMPLETED":
+                    completedChecks += 1
+                elif status == "FAILED":
+                    failedChecks += 1
+                elif status == "IN_PROGRESS":
+                    inProgressChecks += 1
+
+        # 🧮 Calculate per-verification completion %
+        completionPercentage = (
+            math.floor((completedChecks / totalChecks) * 100)
+            if totalChecks > 0 else 0
+        )
+
+        v["progress"] = {
+            "totalChecks": totalChecks,
+            "completedChecks": completedChecks,
+            "failedChecks": failedChecks,
+            "inProgressChecks": inProgressChecks,
+            "completionPercentage": completionPercentage
+        }
+
+        # Aggregate global stats
+        totalCompletedChecks += completedChecks
+        totalAssignedChecks += totalChecks
+        verifications.append(v)
+
+        # 🧩 Build per-candidate summary
+        cId = v["candidateId"]
+        candidateSummaries[cId] = {
+            "candidateId": cId,
+            "candidateName": v.get("candidateName"),
+            "organizationName": v.get("organizationName"),
+            "overallStatus": v.get("overallStatus"),
+            "currentStage": v.get("currentStage"),
+            "completionPercentage": completionPercentage,
+            "failedChecks": failedChecks,
+            "inProgressChecks": inProgressChecks,
+            "totalChecks": totalChecks,
+            "remarks": v.get("remarks", [])
+        }
+
+    # --------------------------------------------
+    # 📊 Compute overall stats
+    # --------------------------------------------
+    overallCompletion = (
+        math.floor((totalCompletedChecks / totalAssignedChecks) * 100)
+        if totalAssignedChecks > 0 else 0
+    )
+
+    # --------------------------------------------
+    # 🪵 Log activity
+    # --------------------------------------------
+    await logActivity(
+        user,
+        "View Verifications",
+        f"{userEmail} viewed {len(verifications)} verifications (avg {overallCompletion}%)",
+        "Success"
+    )
+
+    # --------------------------------------------
+    # ✅ Final Response
+    # --------------------------------------------
+    return JSONResponse(
+        status_code=200,
+        content=jsonable_encoder({
+            "totalVerifications": len(verifications),
+            "overallCompletionPercentage": overallCompletion,
+            "candidatesSummary": list(candidateSummaries.values()),
+            "verifications": verifications
+        })
+    )
+
 from fastapi import FastAPI, Body, Depends, HTTPException, Query
 
 # ----------------------------------------------------------
