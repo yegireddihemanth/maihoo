@@ -210,7 +210,8 @@ async def login(body: loginRequest, response: Response):
         "phoneNumber": user.get("phoneNumber"),
         "isSuperAdmin": isSuperAdmin,
         "session": "created",
-        "token": token
+        "token": token,
+        "permissions": user.get("permissions")
     }
 
 @app.get("/auth/session")
@@ -311,27 +312,27 @@ async def registerOrganization(body: OrganizationRegistration, user: dict = Depe
         })
     )
 
-# -------------------------------
-# Get All Organizations
-# -------------------------------
-@app.get("/secure/getAllOrganizations")
-async def getAllOrganizations(user: dict = Depends(requireAuth)):
-    if user.get("role") != "SUPER_ADMIN":
-        raise HTTPException(status_code=403, detail="Only SUPER_ADMIN can access all organizations")
+# # -------------------------------
+# # Get All Organizations
+# # -------------------------------
+# @app.get("/secure/getAllOrganizations")
+# async def getAllOrganizations(user: dict = Depends(requireAuth)):
+#     if user.get("role") != "SUPER_ADMIN":
+#         raise HTTPException(status_code=403, detail="Only SUPER_ADMIN can access all organizations")
 
-    cursor = orgsCol.find({})
-    orgList = await cursor.to_list(None)
-    results = []
-    for org in orgList:
-        org["_id"] = str(org["_id"])
-        results.append(jsonable_encoder(org))
+#     cursor = orgsCol.find({})
+#     orgList = await cursor.to_list(None)
+#     results = []
+#     for org in orgList:
+#         org["_id"] = str(org["_id"])
+#         results.append(jsonable_encoder(org))
 
-    await logActivity(user, "View Organizations", "Fetched all organizations list.", "Success")
+#     await logActivity(user, "View Organizations", "Fetched all organizations list.", "Success")
 
-    return JSONResponse(
-        status_code=200,
-        content={"totalOrganizations": len(results), "organizations": results}
-    )
+#     return JSONResponse(
+#         status_code=200,
+#         content={"totalOrganizations": len(results), "organizations": results}
+#     )
 
 # -------------------------------
 # Dashboard
