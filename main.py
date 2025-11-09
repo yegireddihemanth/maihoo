@@ -362,11 +362,36 @@ async def registerOrganization(body: OrganizationRegistration, user: dict = Depe
 #         content={"totalOrganizations": len(results), "organizations": results}
 #     )
 
-# -------------------------------
-# Dashboard
-# -------------------------------
+from fastapi import Depends, HTTPException
+from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
+from datetime import datetime, timezone
+from bson import ObjectId
+
+# ✅ Permission guard (import or place at the top of your routes file)
+def requirePermission(requiredPermissions):
+    async def wrapper(user: dict = Depends(requireAuth)):
+        role = user.get("role")
+        userPermissions = user.get("permissions", [])
+
+        # SUPER_ADMIN and SPOC always bypass permission check
+        if role in ["SUPER_ADMIN", "SPOC"]:
+            return user
+
+        # ✅ Dynamic permission validation
+        if not any(p in userPermissions for p in requiredPermissions):
+            raise HTTPException(
+                status_code=403,
+                detail=f"You don't have any of the required permissions: {', '.join(requiredPermissions)}"
+            )
+
+        return user
+    return wrapper
+
+
+# ✅ Updated Dashboard Route
 @app.get("/dashboard")
-async def getDashboard(user: dict = Depends(requireAuth)):
+async def getDashboard(user: dict = Depends(requirePermission(["dashboard:view"]))):
     role = user.get("role")
     orgId = user.get("organizationId")
 
@@ -506,6 +531,7 @@ async def getDashboard(user: dict = Depends(requireAuth)):
     # -------------------------
     else:
         raise HTTPException(status_code=403, detail="Unknown role or not authorized")
+
 
 # -------------------------------
 # Update Organization
@@ -1123,7 +1149,7 @@ async def updateUser(userId: str, body: dict = Body(...), user: dict = Depends(r
 
     targetOrgId = targetUser.get("organizationId")
 
-    # --- Role-Based Access Control ---
+        # --- Role-Based Access Control ---
     if role == "SUPER_ADMIN":
         pass  # full control
 
@@ -1131,6 +1157,15 @@ async def updateUser(userId: str, body: dict = Body(...), user: dict = Depends(r
         accessible = user.get("accessibleOrganizations", [])
         if targetOrgId not in accessible:
             raise HTTPException(status_code=403, detail="Not authorized to modify this user")
+
+    elif role == "SPOC":
+        # SPOC can only modify users from their own organization
+        if targetOrgId != user.get("organizationId"):
+            raise HTTPException(status_code=403, detail="Not authorized to modify users in other organizations")
+
+        # Must also have users:manage permission
+        if "users:manage" not in user.get("permissions", []):
+            raise HTTPException(status_code=403, detail="You don't have permission to manage users")
 
     elif role == "ORG_HR":
         if targetOrgId != user.get("organizationId"):
