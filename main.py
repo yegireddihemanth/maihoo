@@ -760,10 +760,10 @@ async def addHelper(body: dict = Body(...), user: dict = Depends(requireAuth)):
     defaultPermissionsMap = {
         "SUPER_ADMIN": [
             "organization:view", "organization:update", "users:manage",
-            "verification:view", "verification:assign", "candidate:create", "dashboard:view"
+            "verification:view", "verification:assign", "candidate:create", "dashboard:view",  "organization:create",
         ],
         "SUPER_ADMIN_HELPER": [
-            "organization:view", "verification:view", "verification:assign", "candidate:create"
+            "organization:view", "verification:view", "verification:assign", "candidate:create", "organization:create",
         ],
         "SPOC": [
             "organization:view", "organization:update",
