@@ -179,6 +179,7 @@ async def requireAuth(request: Request):
 # -------------------------------
 @app.post("/auth/login")
 async def login(body: loginRequest, response: Response):
+    # --- Authenticate user ---
     user = await usersCol.find_one({
         "email": body.email,
         "password": body.password,
@@ -190,6 +191,8 @@ async def login(body: loginRequest, response: Response):
     orgId = user.get("organizationId")
     isSuperAdmin = user.get("role") == "SUPER_ADMIN"
     now = int(time.time())
+
+    # --- Build token payload ---
     payload = {
         "email": user["email"],
         "role": user["role"],
@@ -199,6 +202,7 @@ async def login(body: loginRequest, response: Response):
     }
     token = encodeToken(payload)
 
+    # --- Set cookie ---
     response.set_cookie(
         key=cookieName,
         value=token,
@@ -209,18 +213,34 @@ async def login(body: loginRequest, response: Response):
         path="/",
     )
 
+    # --- Fetch organization details ---
+    orgName = None
+    orgServices = []
+    if orgId:
+        try:
+            org = await orgsCol.find_one({"_id": ObjectId(orgId)})
+            if org:
+                orgName = org.get("organizationName")
+                orgServices = org.get("services", [])
+        except Exception as e:
+            print(f"⚠️ Error fetching org details for {orgId}: {e}")
+
+    # --- Log login activity ---
     await logActivity(user, "User Login", f"{user.get('email')} logged in.", "Success")
 
+    # --- Build response ---
     return {
         "userName": user.get("userName"),
         "email": user.get("email"),
         "role": user.get("role"),
         "organizationId": orgId,
+        "organizationName": orgName,
         "phoneNumber": user.get("phoneNumber"),
         "isSuperAdmin": isSuperAdmin,
         "session": "created",
         "token": token,
-        "permissions": user.get("permissions", [])
+        "permissions": user.get("permissions", []),
+        "services": orgServices
     }
 
 @app.get("/auth/session")
@@ -390,12 +410,20 @@ def requirePermission(requiredPermissions):
 
 
 # ✅ Updated Dashboard Route
+from fastapi import Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
+from bson import ObjectId
+
 @app.get("/dashboard")
-async def getDashboard(user: dict = Depends(requirePermission(["dashboard:view"]))):
+async def getDashboard(
+    organizationId: str = Query(None, description="Optional organizationId filter for authorized roles"),
+    user: dict = Depends(requirePermission(["dashboard:view"]))
+):
     role = user.get("role")
     orgId = user.get("organizationId")
 
-    # 🧩 Helper: Count verifications by stage activity (based on checks inside each stage)
+    # 🧩 Helper for stage breakdown
     async def stage_breakdown(query):
         stages = ["primary", "secondary", "final"]
         breakdown = {}
@@ -407,18 +435,81 @@ async def getDashboard(user: dict = Depends(requirePermission(["dashboard:view"]
             breakdown[stage] = count
         return breakdown
 
-    # -------------------------
+    # ---------------------------------------------------
+    # 🔒 STEP 1: Validate requested org access (centralized)
+    # ---------------------------------------------------
+    def ensure_org_access(organizationId):
+        """Ensure the logged-in user has access to the requested organizationId"""
+        # SUPER_ADMIN → full access
+        if role == "SUPER_ADMIN":
+            return True
+
+        # SUPER_ADMIN_HELPER → must be in accessibleOrganizations
+        if role == "SUPER_ADMIN_HELPER":
+            accessible = user.get("accessibleOrganizations", [])
+            if organizationId and organizationId not in accessible:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"You are not authorized to view org {organizationId}"
+                )
+            return True
+
+        # SPOC → check if BGV or not
+        if role == "SPOC":
+            # find org details
+            orgRecord = None
+            try:
+                orgRecord = asyncio.run(orgsCol.find_one({"_id": ObjectId(orgId)}))
+            except Exception:
+                pass
+            orgName = (orgRecord.get("organizationName", "") if orgRecord else "").lower()
+            orgEmail = (orgRecord.get("email", "") if orgRecord else "").lower()
+            orgSub = (orgRecord.get("subDomain", "") if orgRecord else "").lower()
+            globalKeywords = ["bgvapp.in", "bgv.local", "bgvapp.com", "bgv"]
+
+            isBgvSpoc = any(k in orgName for k in globalKeywords) or any(k in orgEmail for k in globalKeywords) or any(k in orgSub for k in globalKeywords)
+
+            # Non-BGV SPOCs only allowed their own org
+            if not isBgvSpoc and organizationId and organizationId != orgId:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"You are not authorized to view dashboard of org {organizationId}"
+                )
+            return True
+
+        # ORG_HR, HELPER, EMPLOYEE → only their org
+        if role in ["ORG_HR", "HELPER", "EMPLOYEE"]:
+            if organizationId and organizationId != orgId:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"You are not authorized to view dashboard of org {organizationId}"
+                )
+            return True
+
+        # Any other role
+        raise HTTPException(status_code=403, detail="Unknown or unauthorized role")
+
+    # validate org access
+    if organizationId:
+        ensure_org_access(organizationId)
+
+    # ---------------------------------------------------
     # SUPER ADMIN
-    # -------------------------
+    # ---------------------------------------------------
     if role == "SUPER_ADMIN":
+        orgFilter = {}
+        if organizationId:
+            orgFilter = {"organizationId": organizationId}
+
         orgCount = await orgsCol.count_documents({})
-        totalRequests = await verificationsCol.count_documents({})
-        ongoingCount = await verificationsCol.count_documents({"overallStatus": "IN_PROGRESS"})
-        completedCount = await verificationsCol.count_documents({"overallStatus": "COMPLETED"})
-        failedCount = await verificationsCol.count_documents({"overallStatus": "FAILED"})
-        stageStats = await stage_breakdown({})
+        totalRequests = await verificationsCol.count_documents(orgFilter)
+        ongoingCount = await verificationsCol.count_documents({**orgFilter, "overallStatus": "IN_PROGRESS"})
+        completedCount = await verificationsCol.count_documents({**orgFilter, "overallStatus": "COMPLETED"})
+        failedCount = await verificationsCol.count_documents({**orgFilter, "overallStatus": "FAILED"})
+        stageStats = await stage_breakdown(orgFilter)
 
         stats = {
+            "filteredByOrganization": organizationId or "ALL",
             "totalOrganizations": orgCount,
             "totalRequests": totalRequests,
             "ongoingVerifications": ongoingCount,
@@ -426,22 +517,21 @@ async def getDashboard(user: dict = Depends(requirePermission(["dashboard:view"]
             "failedVerifications": failedCount,
             "stageBreakdown": stageStats
         }
-
-        await logActivity(user, "View Dashboard", "Super Admin viewed dashboard.", "Success")
+        await logActivity(user, "View Dashboard", "Super Admin viewed dashboard", "Success")
         return JSONResponse(status_code=200, content=jsonable_encoder({
             "role": "SUPER_ADMIN",
             "stats": stats
         }))
 
-    # -------------------------
+    # ---------------------------------------------------
     # SUPER ADMIN HELPER
-    # -------------------------
+    # ---------------------------------------------------
     elif role == "SUPER_ADMIN_HELPER":
         accessible = user.get("accessibleOrganizations", [])
-        if not accessible:
-            raise HTTPException(status_code=403, detail="No organizations assigned")
-
         orgQuery = {"organizationId": {"$in": accessible}}
+        if organizationId:
+            orgQuery = {"organizationId": organizationId}
+
         totalRequests = await verificationsCol.count_documents(orgQuery)
         ongoingCount = await verificationsCol.count_documents({**orgQuery, "overallStatus": "IN_PROGRESS"})
         completedCount = await verificationsCol.count_documents({**orgQuery, "overallStatus": "COMPLETED"})
@@ -449,6 +539,7 @@ async def getDashboard(user: dict = Depends(requirePermission(["dashboard:view"]
         stageStats = await stage_breakdown(orgQuery)
 
         stats = {
+            "filteredByOrganization": organizationId or "ALL_ASSIGNED",
             "accessibleOrganizations": len(accessible),
             "totalRequests": totalRequests,
             "ongoingVerifications": ongoingCount,
@@ -456,29 +547,22 @@ async def getDashboard(user: dict = Depends(requirePermission(["dashboard:view"]
             "failedVerifications": failedCount,
             "stageBreakdown": stageStats
         }
-
-        await logActivity(
-            user, "View Dashboard",
-            f"Super Admin Helper viewed dashboard for {len(accessible)} orgs.",
-            "Success"
-        )
-
+        await logActivity(user, "View Dashboard", "Super Admin Helper viewed dashboard", "Success")
         return JSONResponse(status_code=200, content=jsonable_encoder({
             "role": "SUPER_ADMIN_HELPER",
             "stats": stats
         }))
 
-    # -------------------------
-    # SPOC / ORG_HR (Shared Access)
-    # -------------------------
+    # ---------------------------------------------------
+    # SPOC / ORG_HR
+    # ---------------------------------------------------
     elif role in ["SPOC", "ORG_HR"]:
+        orgQuery = {"organizationId": organizationId or orgId}
         employeeCount = await usersCol.count_documents({
-            "organizationId": orgId,
+            "organizationId": orgQuery["organizationId"],
             "role": {"$in": ["SPOC", "ORG_HR", "HELPER", "EMPLOYEE"]},
             "isActive": True
         })
-
-        orgQuery = {"organizationId": orgId}
         totalRequests = await verificationsCol.count_documents(orgQuery)
         ongoingCount = await verificationsCol.count_documents({**orgQuery, "overallStatus": "IN_PROGRESS"})
         completedCount = await verificationsCol.count_documents({**orgQuery, "overallStatus": "COMPLETED"})
@@ -486,6 +570,7 @@ async def getDashboard(user: dict = Depends(requirePermission(["dashboard:view"]
         stageStats = await stage_breakdown(orgQuery)
 
         stats = {
+            "filteredByOrganization": orgQuery["organizationId"],
             "totalEmployees": employeeCount,
             "totalRequests": totalRequests,
             "ongoingVerifications": ongoingCount,
@@ -493,16 +578,15 @@ async def getDashboard(user: dict = Depends(requirePermission(["dashboard:view"]
             "failedVerifications": failedCount,
             "stageBreakdown": stageStats
         }
-
-        await logActivity(user, "View Dashboard", f"{role} viewed dashboard for org {orgId}.", "Success")
+        await logActivity(user, "View Dashboard", f"{role} viewed dashboard", "Success")
         return JSONResponse(status_code=200, content=jsonable_encoder({
             "role": role,
             "stats": stats
         }))
 
-    # -------------------------
+    # ---------------------------------------------------
     # HELPER / EMPLOYEE
-    # -------------------------
+    # ---------------------------------------------------
     elif role in ["HELPER", "EMPLOYEE"]:
         userId = str(user["_id"])
         userQuery = {"assignedTo": userId}
@@ -519,19 +603,17 @@ async def getDashboard(user: dict = Depends(requirePermission(["dashboard:view"]
             "failedVerifications": failedCount,
             "stageBreakdown": stageStats
         }
-
         await logActivity(user, "View Dashboard", f"{role} viewed personal dashboard.", "Success")
         return JSONResponse(status_code=200, content=jsonable_encoder({
             "role": role,
             "stats": stats
         }))
 
-    # -------------------------
+    # ---------------------------------------------------
     # FALLBACK
-    # -------------------------
+    # ---------------------------------------------------
     else:
         raise HTTPException(status_code=403, detail="Unknown role or not authorized")
-
 
 # -------------------------------
 # Update Organization
