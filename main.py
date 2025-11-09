@@ -277,8 +277,19 @@ async def registerOrganization(body: OrganizationRegistration, user: dict = Depe
     Purpose:
         Registers a new organization and creates its SPOC user.
     """
-    if user.get("role") != "SUPER_ADMIN":
-        raise HTTPException(status_code=403, detail="Only SUPER_ADMIN can register organizations")
+    role = user.get("role")
+    userOrgId = user.get("organizationId")
+
+    # Fetch the org of the logged-in user
+    userOrg = await orgsCol.find_one({"_id": ObjectId(userOrgId)})
+
+    subDomain = (userOrg.get("subDomain", "") if userOrg else "").lower()
+
+    isGlobalSpoc = (role == "SPOC" and subDomain in ["bgv.local", "bgvapp.in", "www.bgvapp.in"])
+
+    if not (role == "SUPER_ADMIN" or isGlobalSpoc):
+        raise HTTPException(status_code=403, detail="Only Super Admin or Global SPOC can add organizations")
+
 
     cleanOrgName = body.organizationName.split()[0].lower()
     autoSubDomain = body.subDomain or f"{cleanOrgName}.bgvapp.in"
@@ -744,31 +755,32 @@ async def addHelper(body: dict = Body(...), user: dict = Depends(requireAuth)):
     helperRole = body.get("role")
     helperPhone = body.get("phoneNumber")
     helperPermissions = body.get("permissions", [])
-    # 🧩 Default permissions by role (auto-assigned if not provided)
-    if not helperPermissions:
-        defaultPermissionsMap = {
-            "SUPER_ADMIN": [
-                "organization:view", "organization:update", "users:manage",
-                "verification:view", "verification:assign", "candidate:create", "dashboard:view"
-            ],
-            "SUPER_ADMIN_HELPER": [
-                "organization:view", "verification:view", "verification:assign", "candidate:create"
-            ],
-            "SPOC": [
-                "organization:view", "organization:update",
-                "employee:create", "verification:view", "verification:assign",
-                "dashboard:view", "users:manage", "candidate:create"
-            ],
-            "ORG_HR": [
-                "verification:view", "verification:assign",
-                "candidate:create", "employee:create"
-            ],
-            "HELPER": [
-                "verification:view", "verification:assign"
-            ]
-        }
 
-    helperPermissions = defaultPermissionsMap.get(helperRole, [])
+    # 🧩 Default permissions by role (auto-assigned if not provided)
+    defaultPermissionsMap = {
+        "SUPER_ADMIN": [
+            "organization:view", "organization:update", "users:manage",
+            "verification:view", "verification:assign", "candidate:create", "dashboard:view"
+        ],
+        "SUPER_ADMIN_HELPER": [
+            "organization:view", "verification:view", "verification:assign", "candidate:create"
+        ],
+        "SPOC": [
+            "organization:view", "organization:update",
+            "employee:create", "verification:view", "verification:assign",
+            "dashboard:view", "users:manage", "candidate:create"
+        ],
+        "ORG_HR": [
+            "verification:view", "verification:assign",
+            "candidate:create", "employee:create"
+        ],
+        "HELPER": [
+            "verification:view", "verification:assign"
+        ]
+    }
+
+    if not helperPermissions:
+        helperPermissions = defaultPermissionsMap.get(helperRole, [])
 
     helperIsActive = body.get("isActive", True)
     helperPassword = body.get("password") or "Welcome1"
@@ -875,15 +887,10 @@ async def addHelper(body: dict = Body(...), user: dict = Depends(requireAuth)):
             raise HTTPException(status_code=403, detail="SPOC can only add HR Admins or Helpers to their own org")
 
     elif role == "SUPER_ADMIN_HELPER":
-        # ✅ FIXED: We no longer check for 'accessibleOrgs' in request body
-        # only validate that helperRole is allowed
         if helperRole not in ["HELPER", "ORG_HR"]:
             raise HTTPException(status_code=403, detail="SUPER_ADMIN_HELPER can only add Helpers or Org HRs")
 
-    # SUPER_ADMIN has no restrictions
-
     # 🧩 Step 8: Create helper user document
-        # 🧩 Step 8: Create helper user document
     now = datetime.now(timezone.utc).isoformat()
     helperDoc = {
         "userName": helperName,
@@ -933,7 +940,6 @@ async def addHelper(body: dict = Body(...), user: dict = Depends(requireAuth)):
         "defaultPassword": helperPassword
     }
 
-    # ✅ Add only if the created user is SUPER_ADMIN_HELPER
     if helperRole == "SUPER_ADMIN_HELPER" and body.get("accessibleOrganizations"):
         helperResponse["accessibleOrganizations"] = body.get("accessibleOrganizations")
 
@@ -951,7 +957,6 @@ async def addHelper(body: dict = Body(...), user: dict = Depends(requireAuth)):
     }
 
     return JSONResponse(status_code=201, content=jsonable_encoder(response_data))
-
 
 
 # @app.get("/secure/getOrganizationsList")
