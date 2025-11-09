@@ -28,6 +28,7 @@ async def simulate_processing(task_name: str, min_sec=2, max_sec=5):
     remarks = f"{task_name} verification {'successful' if success else 'failed'} after {duration}s"
     return status, remarks
 
+
 # -----------------------
 # 🪪 Primary Checks
 # -----------------------
@@ -49,14 +50,21 @@ async def verify_uan(uan_number: str = None):
 async def verify_fir(candidate_name: str):
     return await simulate_processing("FIR / Criminal Record")
 
+async def verify_passport(passport_number: str = None):
+    return await simulate_processing("Passport")
+
 # -----------------------
 # 🎓 Final Checks
 # -----------------------
-async def verify_degree(candidate_name: str):
-    return await simulate_processing("Degree Verification")
+async def verify_education(candidate_name: str):
+    return await simulate_processing("Education Verification")
+
+async def verify_employment(candidate_name: str):
+    return await simulate_processing("Employment Verification")
 
 async def verify_cibil(candidate_name: str):
     return await simulate_processing("CIBIL / Credit Score")
+
 
 # -----------------------
 # 🚦 Dispatcher (Router)
@@ -78,16 +86,21 @@ async def run_verification(check_type: str, candidate: dict):
         return await verify_uan()
     elif check_type in ["fir", "criminal", "criminal_record", "criminal_record_verification"]:
         return await verify_fir(candidate.get("firstName"))
+    elif check_type in ["passport", "passport_verification", "passportcheck", "passport_check"]:
+        return await verify_passport(candidate.get("passportNumber"))
 
     # --- Final Stage ---
-    elif check_type in ["degree", "degree_verification", "education", "education_verification"]:
-        return await verify_degree(candidate.get("firstName"))
+    elif check_type in ["education", "education_verification", "degree", "degree_verification"]:
+        return await verify_education(candidate.get("firstName"))
+    elif check_type in ["employment", "employment_verification"]:
+        return await verify_employment(candidate.get("firstName"))
     elif check_type in ["cibil", "cibil_report", "cibil_score"]:
         return await verify_cibil(candidate.get("firstName"))
 
-    # ❌ Unknown type
+    # ❌ Unknown type fallback
     else:
         return "FAILED", f"Unknown check type: {check_type}"
+
 
 # ---------------------------------------------------
 # 🧠 Verification Orchestrator for pending requests
