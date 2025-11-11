@@ -141,7 +141,7 @@ git commit -m "Resolved merge conflicts in <filename>"
 ```bash
 git push origin main
 ```
-
+ 
 ---
 
 ### ✅ Optional Clean-up
