@@ -26,7 +26,8 @@ from bson import ObjectId
 from bson.errors import InvalidId
 import asyncio
 from apis import run_verification  # ← Import dummy verification dispatcher
-from utils.email_utils import send_self_verification_link
+from utils.email_utils import send_self_verification_email
+from utils.email_utils import create_self_token, decode_self_token, send_self_verification_email
 
 
 # -------------------------------
@@ -2218,7 +2219,7 @@ from datetime import datetime, timezone, timedelta
 from bson import ObjectId
 from fastapi import HTTPException, Body, Depends
 from fastapi.responses import JSONResponse
-from utils.email_utils import send_self_verification_link
+
 
 
 from fastapi import UploadFile, File, Form
@@ -2229,8 +2230,7 @@ from fastapi.responses import JSONResponse
 from datetime import datetime, timezone
 import jwt
 
-# import utils functions
-from utils import create_self_token, decode_self_token, send_self_verification_email
+
 
 # Reuse your existing run_verification (synchronous check runner) or call the async one.
 # from apis import run_verification   # ensure this import matches your project
@@ -2352,7 +2352,28 @@ async def initiateSelfVerification(body: dict = Body(...), user: dict = Depends(
 
     # Send email
     try:
-        send_self_verification_email(candidate.get("email"), verificationDoc["candidateName"], token, organizationName)
+        # Validate candidate email
+        candidateEmail = candidate.get("email")
+        candidateName = f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip()
+
+        if not candidateEmail or "@" not in candidateEmail:
+            await logActivity(
+                user,
+                "Self Verification Skipped",
+                f"Candidate {candidateName} has no valid email; skipping self-verification link.",
+                "Warning"
+            )
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "message": f"Candidate {candidateName} does not have a valid email address. Cannot send self-verification link."
+                }
+            )
+
+        # Generate token and send email
+        token, exp = create_self_token(candidateId, organizationId)
+        send_self_verification_email(candidateEmail, candidateName, token, organizationName)
+        
     except Exception as e:
         # optionally remove verification if email fails
         await verificationsCol.delete_one({"_id": res.inserted_id})
@@ -2724,9 +2745,10 @@ async def addCandidate(body: dict = Body(...), user: dict = Depends(requireAuth)
     panNumber = body.get("panNumber")
     address = body.get("address")
     inputOrgId = body.get("organizationId")
+    candidateEmail = body.get("email")
 
     # --- Basic validations ---
-    if not all([firstName, lastName, phone, aadhaarNumber, panNumber, address]):
+    if not all([firstName, lastName, phone, aadhaarNumber, panNumber, address, candidateEmail]):
         raise HTTPException(status_code=400, detail="Missing required candidate details")
 
     # ------------------------
@@ -2787,18 +2809,19 @@ async def addCandidate(body: dict = Body(...), user: dict = Depends(requireAuth)
     else:
         raise HTTPException(status_code=403, detail="Not authorized to add candidates")
 
-    # --- Prevent duplicate candidate (same Aadhaar or PAN within same org) ---
+    # --- Prevent duplicate candidate (same Aadhaar or PAN or email within same org ) ---
     existing = await candidatesCol.find_one({
         "organizationId": orgId,
         "$or": [
             {"aadhaarNumber": aadhaarNumber},
-            {"panNumber": panNumber}
+            {"panNumber": panNumber},
+            {"email": candidateEmail} 
         ]
     })
     if existing:
         raise HTTPException(
             status_code=409,
-            detail=f"Candidate with Aadhaar/PAN already exists in {orgName}"
+            detail=f"Candidate with Aadhaar/PAN/email already exists in {orgName}"
         )
 
     # ---------------------
@@ -2817,7 +2840,8 @@ async def addCandidate(body: dict = Body(...), user: dict = Depends(requireAuth)
         "organizationName": orgName,
         "status": "PENDING",
         "createdAt": now,
-        "createdBy": creatorEmail
+        "createdBy": creatorEmail,
+        "email": candidateEmail
     }
 
     # ✅ Debug sanity check before insert

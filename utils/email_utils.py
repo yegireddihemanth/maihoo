@@ -1,5 +1,3 @@
-# utils.py
-import os
 import jwt
 import smtplib
 from datetime import datetime, timedelta, timezone
@@ -7,19 +5,26 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Tuple
 
-# SECRET for self-verification tokens (keep different from auth token)
-SELF_VERIF_SECRET = os.environ.get("SELF_VERIF_SECRET", "change_this_secret")
+# ============================================================
+# 🔐 Self-verification token configuration
+# ============================================================
+SELF_VERIF_SECRET = "my_secret_key_123"  # change to something unique
 SELF_VERIF_ALGO = "HS256"
-SELF_VERIF_EXPIRE_MINUTES = int(os.environ.get("SELF_VERIF_EXPIRE_MINUTES", "1440"))  # default: 24h
+SELF_VERIF_EXPIRE_MINUTES = 1440  # 24 hours
 
-# Simple mailer config — replace with your SMTP or transactional provider
-SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.example.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "username")
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "password")
-FROM_EMAIL = os.environ.get("FROM_EMAIL", "no-reply@example.com")
-FRONTEND_SELF_VERIFY_URL = os.environ.get("FRONTEND_SELF_VERIFY_URL", "http://localhost:3000/self-verify")
+# ============================================================
+# 📧 Gmail SMTP configuration (using App Password)
+# ============================================================
+SMTP_HOST = "smtp.gmail.com"
+SMTP_PORT = 587
+SMTP_USERNAME = "hemanthdevapple@gmail.com"          # your Gmail ID
+SMTP_PASSWORD = "wqjd ctur lkwf zhwl"          # your generated App Password (16 chars, spaces optional)
+FROM_EMAIL = "hemanthdevapple@gmail.com"             # sender address
+FRONTEND_SELF_VERIFY_URL = "http://localhost:3000/self-verify"  # your frontend link
 
+# ============================================================
+# 🔑 Token creation and decoding helpers
+# ============================================================
 def create_self_token(candidateId: str, organizationId: str, expires_minutes: int = None) -> Tuple[str, int]:
     exp_minutes = expires_minutes or SELF_VERIF_EXPIRE_MINUTES
     now = datetime.now(timezone.utc)
@@ -32,13 +37,23 @@ def create_self_token(candidateId: str, organizationId: str, expires_minutes: in
     token = jwt.encode(payload, SELF_VERIF_SECRET, algorithm=SELF_VERIF_ALGO)
     return token, payload["exp"]
 
+
 def decode_self_token(token: str) -> dict:
-    """Raises jwt.ExpiredSignatureError, jwt.DecodeError if invalid."""
+    """Raises jwt.ExpiredSignatureError or jwt.DecodeError if invalid."""
     return jwt.decode(token, SELF_VERIF_SECRET, algorithms=[SELF_VERIF_ALGO])
 
+
+# ============================================================
+# ✉️ Email sender (simple Gmail SMTP)
+# ============================================================
 def send_self_verification_email(to_email: str, candidateName: str, token: str, organizationName: str):
+    """
+    Sends self-verification link to the candidate via Gmail SMTP.
+    Uses your Gmail account (App Password).
+    """
     verify_link = f"{FRONTEND_SELF_VERIFY_URL}?token={token}"
     subject = f"Start your verification for {organizationName}"
+
     body = f"""
 Hi {candidateName},
 
@@ -51,23 +66,22 @@ This link will expire in {int(SELF_VERIF_EXPIRE_MINUTES/60)} hours.
 If you did not request this, ignore this email.
 
 Thanks,
-{organizationName}
+{organizationName} Verification Team
 """
-    # Build message
+
+    # Build the MIME email
     msg = MIMEMultipart()
     msg["From"] = FROM_EMAIL
     msg["To"] = to_email
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain"))
 
-    # Send
     try:
-        s = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10)
-        s.starttls()
-        s.login(SMTP_USERNAME, SMTP_PASSWORD)
-        s.sendmail(FROM_EMAIL, [to_email], msg.as_string())
-        s.quit()
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as smtp:
+            smtp.starttls()  # enable TLS
+            smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+            smtp.sendmail(FROM_EMAIL, [to_email], msg.as_string())
+        print(f"[Email Sent ✅] Verification mail sent to {to_email}")
     except Exception as e:
-        # If you prefer, raise so the caller logs/handles it
-        print(f"[utils.send_self_verification_email] failed: {e}")
+        print(f"[Email Error ❌] Failed to send to {to_email}: {e}")
         raise
