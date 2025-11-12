@@ -26,6 +26,8 @@ from bson import ObjectId
 from bson.errors import InvalidId
 import asyncio
 from apis import run_verification  # ← Import dummy verification dispatcher
+from utils.email_utils import send_self_verification_link
+
 
 # -------------------------------
 # Config
@@ -2208,6 +2210,214 @@ async def initiateVerification(body: dict = Body(...), user: dict = Depends(requ
             "status": "IN_PROGRESS"
         })
     )
+
+
+
+import uuid
+from datetime import datetime, timezone, timedelta
+from bson import ObjectId
+from fastapi import HTTPException, Body, Depends
+from fastapi.responses import JSONResponse
+from utils.email_utils import send_self_verification_link
+
+
+@app.post("/secure/initiateSelfVerification")
+async def initiateSelfVerification(body: dict = Body(...), user: dict = Depends(requireAuth)):
+    """
+    Initiate self-verification flow.
+    Allows sending a secure link to the candidate to complete their own verification.
+    
+    Roles:
+      - SUPER_ADMIN / BGV SPOC: any org, any candidate
+      - SUPER_ADMIN_HELPER: only within accessible organizations
+      - ORG_SPOC / ORG_HR: only within their own organization
+      - HELPER: only for candidates created by them
+    """
+
+    role = user.get("role")
+    userEmail = user.get("email", "").lower().strip()
+    userOrgId = str(user.get("organizationId"))
+    accessibleOrgs = [str(x) for x in user.get("accessibleOrganizations", [])]
+
+    candidateId = body.get("candidateId")
+    stages = body.get("stages", {})
+
+    if not candidateId:
+        raise HTTPException(status_code=400, detail="Candidate ID is required")
+
+    try:
+        candidateObjId = ObjectId(candidateId)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid Candidate ID format")
+
+    # Fetch candidate
+    candidate = await candidatesCol.find_one({"_id": candidateObjId})
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    candidateOrgId = str(candidate.get("organizationId"))
+    candidateCreatedBy = candidate.get("createdBy", "").lower().strip()
+    organizationId = None
+    organizationName = None
+
+    # -------------------------------------------------------------------------
+    # 🔒 ROLE VALIDATION
+    # -------------------------------------------------------------------------
+    if role == "SUPER_ADMIN":
+        organizationId = body.get("organizationId") or candidateOrgId
+
+    elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
+        organizationId = body.get("organizationId") or candidateOrgId
+
+    elif role == "SUPER_ADMIN_HELPER":
+        organizationId = body.get("organizationId") or candidateOrgId
+        if organizationId not in accessibleOrgs:
+            raise HTTPException(status_code=403, detail="You are not authorized for this organization")
+
+    elif role in ["SPOC", "ORG_HR"]:
+        organizationId = userOrgId
+        if candidateOrgId != userOrgId:
+            raise HTTPException(status_code=403, detail="Candidate not from your organization")
+
+    elif role == "HELPER":
+        organizationId = userOrgId
+        if candidateOrgId != userOrgId:
+            raise HTTPException(status_code=403, detail="Candidate belongs to another organization")
+        if candidateCreatedBy != userEmail:
+            raise HTTPException(status_code=403, detail="You can only send self-verification for your own candidates")
+
+    else:
+        raise HTTPException(status_code=403, detail="You are not authorized to initiate self verification")
+
+    # -------------------------------------------------------------------------
+    # 🏢 Validate Organization
+    # -------------------------------------------------------------------------
+    org = await orgsCol.find_one({"_id": ObjectId(organizationId)})
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    organizationName = org.get("organizationName")
+
+    # -------------------------------------------------------------------------
+    # 🔍 Check if verification already exists
+    # -------------------------------------------------------------------------
+    existing = await verificationsCol.find_one({"candidateId": candidateId, "organizationId": organizationId})
+    if existing:
+        status = existing.get("overallStatus")
+        initiatedBy = existing.get("initiatedBy", "Unknown")
+        if status in ["IN_PROGRESS", "PENDING"]:
+            return JSONResponse(status_code=200, content={
+                "message": f"Verification already in progress (initiated by {initiatedBy})"
+            })
+        elif status == "COMPLETED":
+            return JSONResponse(status_code=200, content={
+                "message": "Verification already completed"
+            })
+        elif status == "FAILED":
+            failedStage = existing.get("failureStage", "unknown stage")
+            return JSONResponse(status_code=200, content={
+                "message": f"Verification previously failed at {failedStage} (initiated by {initiatedBy})"
+            })
+
+    # -------------------------------------------------------------------------
+    # 🧾 Create Self-Verification Token + Link
+    # -------------------------------------------------------------------------
+    token = str(uuid.uuid4())
+    tokenExpiry = (datetime.now(timezone.utc) + timedelta(hours=48)).isoformat()
+    baseUrl = "http://localhost:5001/self-verify"
+
+    verificationLink = f"{baseUrl}?orgId={organizationId}&candidateId={candidateId}&token={token}"
+
+    # -------------------------------------------------------------------------
+    # 🧩 Build Verification Doc
+    # -------------------------------------------------------------------------
+    def buildChecks(stageList):
+        return [{"check": c, "status": "NOT_STARTED", "remarks": None} for c in stageList]
+
+    verificationDoc = {
+        "candidateId": candidateId,
+        "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
+        "organizationId": organizationId,
+        "organizationName": organizationName,
+        "initiatedBy": userEmail,
+        "initiatedAt": datetime.now(timezone.utc).isoformat(),
+        "selfVerification": True,
+        "verificationLink": verificationLink,
+        "token": token,
+        "tokenExpiry": tokenExpiry,
+        "stages": {
+            "primary": buildChecks(stages.get("primary", [])),
+            "secondary": buildChecks(stages.get("secondary", [])),
+            "final": buildChecks(stages.get("final", []))
+        },
+        "currentStage": "primary",
+        "overallStatus": "PENDING",
+        "remarks": []
+    }
+
+    result = await verificationsCol.insert_one(verificationDoc)
+
+    # -------------------------------------------------------------------------
+    # 🧠 Update Candidate Status
+    # -------------------------------------------------------------------------
+    await candidatesCol.update_one(
+        {"_id": candidateObjId},
+        {"$set": {"status": "SELF_VERIFICATION_PENDING"}}
+    )
+
+    # -------------------------------------------------------------------------
+    # 📧 Send Email
+    # -------------------------------------------------------------------------
+    email_sent = await send_self_verification_link(candidate, org, verificationLink)
+
+    # -------------------------------------------------------------------------
+    # 🪵 Log Activity
+    # -------------------------------------------------------------------------
+    await logActivity(
+        user,
+        "Initiated Self Verification",
+        f"{userEmail} ({role}) initiated self-verification for {candidate.get('firstName')} ({organizationName})",
+        "Success" if email_sent else "Warning"
+    )
+
+    # -------------------------------------------------------------------------
+    # ✅ Response
+    # -------------------------------------------------------------------------
+    return JSONResponse(
+        status_code=201,
+        content=jsonable_encoder({
+            "message": "Self-verification link sent successfully" if email_sent else "Verification created, but email failed",
+            "verificationId": str(result.inserted_id),
+            "verificationLink": verificationLink,
+            "candidate": {
+                "id": candidateId,
+                "name": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip()
+            },
+            "organization": {
+                "id": organizationId,
+                "name": organizationName
+            },
+            "initiatedBy": userEmail,
+            "status": "PENDING",
+            "tokenExpiry": tokenExpiry
+        })
+    )
+
+
+@app.get("/self-verify")
+async def self_verify_entry(orgId: str, candidateId: str, token: str):
+    verification = await verificationsCol.find_one({
+        "candidateId": candidateId,
+        "organizationId": orgId,
+        "token": token
+    })
+    if not verification:
+        raise HTTPException(status_code=404, detail="Invalid or expired verification link")
+    return {
+        "message": "Link valid",
+        "candidate": verification.get("candidateName"),
+        "organization": verification.get("organizationName"),
+        "status": verification.get("overallStatus")
+    }
 
 
 from apis import process_verification_record
