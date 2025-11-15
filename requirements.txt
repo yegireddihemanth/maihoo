@@ -5,3 +5,4 @@ pymongo
 pydantic
 python-dotenv
 PyJWT
+python-multipart
