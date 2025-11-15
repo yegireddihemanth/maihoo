@@ -10,7 +10,7 @@ SMTP_USERNAME = "hemanthdevapple@gmail.com"
 SMTP_PASSWORD = "wqjd ctur lkwf zhwl"   # App password
 FROM_EMAIL = "hemanthdevapple@gmail.com"
 
-FRONTEND_SELF_VERIFY_URL = "http://localhost:3000/self-verify"
+FRONTEND_SELF_VERIFY_URL = "https://maihoo.onrender.com/self-verify"
 
 def send_self_verification_email(to_email, candidateName, organizationName,
                                  candidateId, organizationId, aadhaarLast4):
