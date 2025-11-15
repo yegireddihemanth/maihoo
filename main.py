@@ -44,7 +44,7 @@ cookieSameSite = "none"
 # -------------------------------
 # Init
 # -------------------------------
-app = FastAPI(title="BGV Login API with Cookies", version="1.0.0")
+app = FastAPI(title="BGV Login API with Cookies",  version="1.0.0", docs_url="/docs")
 
 origins = [
     "https://localhost:3443",
@@ -181,6 +181,16 @@ async def requireAuth(request: Request):
         raise HTTPException(status_code=401, detail="user not found")
     return user
 
+from fastapi.openapi.docs import get_swagger_ui_html
+
+
+
+@app.get("/swagger", include_in_schema=False)
+async def custom_swagger():
+    return get_swagger_ui_html(
+        openapi_url=app.openapi_url,  # Auto uses correct domain
+        title="Swagger UI",
+    )
 
 # -------------------------------
 # Auth Routes
