@@ -1693,308 +1693,802 @@ async def getCandidates(
 
 
 
-# Assuming these exist in your environment
-# from your_project.auth import requireAuth
-# from your_project.db import candidatesCol, verificationsCol, orgsCol
-# from your_project.utils import logActivity
+# # Assuming these exist in your environment
+# # from your_project.auth import requireAuth
+# # from your_project.db import candidatesCol, verificationsCol, orgsCol
+# # from your_project.utils import logActivity
 
-# -------------------------------------------------------------------------
-# 🚀 GLOBAL PIPELINE FUNCTION (moved outside so it’s accessible everywhere)
-# -------------------------------------------------------------------------
-async def process_verification_pipeline(verification_id, candidate, stages):
+# # -------------------------------------------------------------------------
+# # 🚀 GLOBAL PIPELINE FUNCTION (moved outside so it’s accessible everywhere)
+# # -------------------------------------------------------------------------
+# async def process_verification_pipeline(verification_id, candidate, stages):
+#     """
+#     System-driven verification pipeline (role-agnostic).
+#     Runs all verification checks sequentially (Primary → Secondary → Final).
+#     """
+#     try:
+#         verification_oid = verification_id if isinstance(verification_id, ObjectId) else ObjectId(verification_id)
+
+#         candidateObjId = None
+#         if isinstance(candidate.get("_id"), ObjectId):
+#             candidateObjId = candidate["_id"]
+#         elif candidate.get("_id"):
+#             candidateObjId = ObjectId(candidate["_id"])
+#         elif candidate.get("id"):
+#             candidateObjId = ObjectId(candidate["id"])
+
+#         organizationName = candidate.get("organizationName", "Unknown")
+#         organizationId = str(candidate.get("organizationId", ""))
+
+#         stage_order = ["primary", "secondary", "final"]
+
+#         def first_incomplete_stage(_stages: dict) -> Optional[str]:
+#             for stg in stage_order:
+#                 checks = _stages.get(stg, [])
+#                 if any(ch.get("status") != "COMPLETED" for ch in checks):
+#                     return stg
+#             return None
+
+#         # Fetch latest from DB
+#         ver_doc = await verificationsCol.find_one({"_id": verification_oid})
+#         if ver_doc and "stages" in ver_doc:
+#             stages = ver_doc["stages"]
+
+#         start_stage = first_incomplete_stage(stages)
+#         if start_stage is None:
+#             await verificationsCol.update_one(
+#                 {"_id": verification_oid},
+#                 {"$set": {"overallStatus": "COMPLETED", "currentStage": "final"}}
+#             )
+#             if candidateObjId:
+#                 await candidatesCol.update_one(
+#                     {"_id": candidateObjId},
+#                     {"$set": {"status": "VERIFIED"}}
+#                 )
+#             await logActivity(
+#                 {"email": "system"},
+#                 "Verification Completed",
+#                 f"All stages already passed for {candidate.get('firstName')} ({organizationName})",
+#                 "Success"
+#             )
+#             return
+
+#         # Run from first incomplete stage onward
+#         start_index = stage_order.index(start_stage)
+#         for stage_name in stage_order[start_index:]:
+#             checks = stages.get(stage_name, []) or []
+
+#             await verificationsCol.update_one(
+#                 {"_id": verification_oid},
+#                 {"$set": {"currentStage": stage_name}}
+#             )
+
+#             for check in checks:
+#                 check_name = check["check"]
+#                 current_status = (check.get("status") or "NOT_STARTED").upper()
+#                 if current_status == "COMPLETED":
+#                     continue
+
+#                 await verificationsCol.update_one(
+#                     {"_id": verification_oid, f"stages.{stage_name}.check": check_name},
+#                     {"$set": {f"stages.{stage_name}.$.status": "IN_PROGRESS"}}
+#                 )
+
+#                 # Safe verification runner
+#                 try:
+#                     status, remarks = await run_verification(check_name, candidate)
+#                 except Exception as e:
+#                     status, remarks = "FAILED", f"Runtime error in {check_name}: {str(e)}"
+
+#                 await verificationsCol.update_one(
+#                     {"_id": verification_oid, f"stages.{stage_name}.check": check_name},
+#                     {"$set": {
+#                         f"stages.{stage_name}.$.status": status,
+#                         f"stages.{stage_name}.$.remarks": remarks
+#                     }}
+#                 )
+
+#                 if status == "FAILED":
+#                     fail_tag = f"{stage_name}_{check_name}"
+#                     await verificationsCol.update_one(
+#                         {"_id": verification_oid},
+#                         {"$set": {
+#                             "overallStatus": "FAILED",
+#                             "failureStage": fail_tag,
+#                             "currentStage": stage_name
+#                         }}
+#                     )
+#                     if candidateObjId:
+#                         await candidatesCol.update_one(
+#                             {"_id": candidateObjId},
+#                             {"$set": {"status": f"FAILED_AT_{fail_tag.upper()}"}}
+#                         )
+#                     await logActivity(
+#                         {"email": "system"},
+#                         "Verification Failed",
+#                         f"Verification stopped at {fail_tag} for {candidate.get('firstName')} ({organizationName}) [{organizationId}]",
+#                         "Error"
+#                     )
+#                     return
+
+#             await asyncio.sleep(2)
+
+#         # Everything passed
+#         await verificationsCol.update_one(
+#             {"_id": verification_oid},
+#             {"$set": {"overallStatus": "COMPLETED", "currentStage": "final"}}
+#         )
+#         if candidateObjId:
+#             await candidatesCol.update_one(
+#                 {"_id": candidateObjId},
+#                 {"$set": {"status": "VERIFIED"}}
+#             )
+#         await logActivity(
+#             {"email": "system"},
+#             "Verification Completed",
+#             f"All stages passed for {candidate.get('firstName')} ({organizationName}) [{organizationId}]",
+#             "Success"
+#         )
+
+#     except Exception as e:
+#         try:
+#             verification_oid = verification_id if isinstance(verification_id, ObjectId) else ObjectId(verification_id)
+#             await verificationsCol.update_one(
+#                 {"_id": verification_oid},
+#                 {"$set": {"overallStatus": "FAILED", "error": str(e)}}
+#             )
+#         except Exception:
+#             pass
+
+#         try:
+#             if candidate.get("_id"):
+#                 cid = candidate["_id"] if isinstance(candidate["_id"], ObjectId) else ObjectId(candidate["_id"])
+#                 await candidatesCol.update_one(
+#                     {"_id": cid},
+#                     {"$set": {"status": "FAILED_UNKNOWN_ERROR"}}
+#                 )
+#         except Exception:
+#             pass
+
+#         await logActivity(
+#             {"email": "system"},
+#             "Verification Failed",
+#             f"Error during verification pipeline: {str(e)} [{organizationName}]",
+#             "Error"
+#         )
+
+# # -------------------------------------------------------------------------
+# # ♻️ Retry only failed checks (auto-resume pipeline if all pass)
+# # -------------------------------------------------------------------------
+# async def retry_failed_checks(verification, failed_checks, candidate, user):
+#     """
+#     Retries failed checks with strict role and org-level access control.
+#     ---------------------------------------------------------------
+#     Rules:
+#       - SUPER_ADMIN / BGV SPOC → can retry any verification
+#       - SUPER_ADMIN_HELPER → only in accessibleOrganizations
+#       - ORG_SPOC / ORG_HR → only their own organization
+#       - HELPER → only their own initiated verifications
+#     """
+#     try:
+#         role = user.get("role")
+#         userEmail = user.get("email", "").lower().strip()
+#         userOrgId = str(user.get("organizationId"))
+#         accessibleOrgs = [str(x) for x in user.get("accessibleOrganizations", [])]
+
+#         verification_oid = verification["_id"] if isinstance(verification["_id"], ObjectId) else ObjectId(verification["_id"])
+#         verificationOrgId = str(verification.get("organizationId", ""))  # ensure string form
+#         initiatedBy = verification.get("initiatedBy", "").lower().strip()
+
+#         # --------------------------------------------
+#         # 🔒 Role-based access validation
+#         # --------------------------------------------
+#         if role == "SUPER_ADMIN":
+#             pass  # full access
+
+#         elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
+#             pass  # BGV global SPOC, full access
+
+#         elif role == "SUPER_ADMIN_HELPER":
+#             if verificationOrgId not in accessibleOrgs:
+#                 raise HTTPException(status_code=403, detail="Not authorized for this organization")
+
+#         elif role in ["ORG_SPOC", "ORG_HR"]:
+#             if verificationOrgId != userOrgId:
+#                 raise HTTPException(status_code=403, detail="You can only retry verifications in your organization")
+
+#         elif role == "HELPER":
+#             if initiatedBy != userEmail:
+#                 raise HTTPException(status_code=403, detail="You can only retry your own verifications")
+
+#         else:
+#             raise HTTPException(status_code=403, detail="You are not authorized to retry verifications")
+
+#         # --------------------------------------------
+#         # ✅ Retry each failed check
+#         # --------------------------------------------
+#         for stage_name, check_name in failed_checks:
+#             await verificationsCol.update_one(
+#                 {"_id": verification_oid, f"stages.{stage_name}.check": check_name},
+#                 {"$set": {f"stages.{stage_name}.$.status": "IN_PROGRESS"}}
+#             )
+
+#             try:
+#                 status, remarks = await run_verification(check_name, candidate)
+#             except Exception as e:
+#                 status, remarks = "FAILED", f"Runtime error in {check_name}: {str(e)}"
+
+#             await verificationsCol.update_one(
+#                 {"_id": verification_oid, f"stages.{stage_name}.check": check_name},
+#                 {"$set": {
+#                     f"stages.{stage_name}.$.status": status,
+#                     f"stages.{stage_name}.$.remarks": remarks
+#                 }}
+#             )
+
+#         # --------------------------------------------
+#         # 🔍 Evaluate results after retries
+#         # --------------------------------------------
+#         updated_verification = await verificationsCol.find_one({"_id": verification_oid})
+
+#         failed_any = any(
+#             ch.get("status") == "FAILED"
+#             for stg in ["primary", "secondary", "final"]
+#             for ch in (updated_verification["stages"].get(stg, []) or [])
+#         )
+
+#         # --------------------------------------------
+#         # ❌ If still failed
+#         # --------------------------------------------
+#         if failed_any:
+#             await verificationsCol.update_one(
+#                 {"_id": verification_oid},
+#                 {"$set": {"overallStatus": "FAILED"}}
+#             )
+#             cid = updated_verification.get("candidateId")
+#             if cid:
+#                 await candidatesCol.update_one(
+#                     {"_id": ObjectId(cid)},
+#                     {"$set": {"status": "FAILED_RETRY"}}
+#                 )
+#             await logActivity(
+#                 user,
+#                 "Retry Verification Failed",
+#                 f"Reattempted checks failed again for {updated_verification.get('candidateName')}",
+#                 "Error"
+#             )
+#             return
+
+#         # --------------------------------------------
+#         # ✅ All checks passed — resume verification
+#         # --------------------------------------------
+#         await verificationsCol.update_one(
+#             {"_id": verification_oid},
+#             {"$set": {"overallStatus": "IN_PROGRESS", "failureStage": None}}
+#         )
+
+#         fresh_candidate = candidate
+#         if not candidate.get("_id") and updated_verification.get("candidateId"):
+#             try:
+#                 fresh_candidate = await candidatesCol.find_one({"_id": ObjectId(updated_verification["candidateId"])})
+#             except Exception:
+#                 pass
+
+#         await logActivity(
+#             user,
+#             "Retry Verification Success",
+#             f"All failed checks fixed for {updated_verification.get('candidateName')}, resuming pipeline...",
+#             "Success"
+#         )
+
+#         asyncio.create_task(
+#             process_verification_pipeline(
+#                 verification_oid,
+#                 fresh_candidate or candidate,
+#                 updated_verification["stages"]
+#             )
+#         )
+
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         await logActivity(user, "Retry Verification Error", str(e), "Error")
+#         raise HTTPException(status_code=500, detail=f"Error retrying verifications: {str(e)}")
+
+@app.post("/secure/initiateStageVerification")
+async def initiateStageVerification(body: dict = Body(...), user: dict = Depends(requireAuth)):
     """
-    System-driven verification pipeline (role-agnostic).
-    Runs all verification checks sequentially (Primary → Secondary → Final).
-    """
-    try:
-        verification_oid = verification_id if isinstance(verification_id, ObjectId) else ObjectId(verification_id)
-
-        candidateObjId = None
-        if isinstance(candidate.get("_id"), ObjectId):
-            candidateObjId = candidate["_id"]
-        elif candidate.get("_id"):
-            candidateObjId = ObjectId(candidate["_id"])
-        elif candidate.get("id"):
-            candidateObjId = ObjectId(candidate["id"])
-
-        organizationName = candidate.get("organizationName", "Unknown")
-        organizationId = str(candidate.get("organizationId", ""))
-
-        stage_order = ["primary", "secondary", "final"]
-
-        def first_incomplete_stage(_stages: dict) -> Optional[str]:
-            for stg in stage_order:
-                checks = _stages.get(stg, [])
-                if any(ch.get("status") != "COMPLETED" for ch in checks):
-                    return stg
-            return None
-
-        # Fetch latest from DB
-        ver_doc = await verificationsCol.find_one({"_id": verification_oid})
-        if ver_doc and "stages" in ver_doc:
-            stages = ver_doc["stages"]
-
-        start_stage = first_incomplete_stage(stages)
-        if start_stage is None:
-            await verificationsCol.update_one(
-                {"_id": verification_oid},
-                {"$set": {"overallStatus": "COMPLETED", "currentStage": "final"}}
-            )
-            if candidateObjId:
-                await candidatesCol.update_one(
-                    {"_id": candidateObjId},
-                    {"$set": {"status": "VERIFIED"}}
-                )
-            await logActivity(
-                {"email": "system"},
-                "Verification Completed",
-                f"All stages already passed for {candidate.get('firstName')} ({organizationName})",
-                "Success"
-            )
-            return
-
-        # Run from first incomplete stage onward
-        start_index = stage_order.index(start_stage)
-        for stage_name in stage_order[start_index:]:
-            checks = stages.get(stage_name, []) or []
-
-            await verificationsCol.update_one(
-                {"_id": verification_oid},
-                {"$set": {"currentStage": stage_name}}
-            )
-
-            for check in checks:
-                check_name = check["check"]
-                current_status = (check.get("status") or "NOT_STARTED").upper()
-                if current_status == "COMPLETED":
-                    continue
-
-                await verificationsCol.update_one(
-                    {"_id": verification_oid, f"stages.{stage_name}.check": check_name},
-                    {"$set": {f"stages.{stage_name}.$.status": "IN_PROGRESS"}}
-                )
-
-                # Safe verification runner
-                try:
-                    status, remarks = await run_verification(check_name, candidate)
-                except Exception as e:
-                    status, remarks = "FAILED", f"Runtime error in {check_name}: {str(e)}"
-
-                await verificationsCol.update_one(
-                    {"_id": verification_oid, f"stages.{stage_name}.check": check_name},
-                    {"$set": {
-                        f"stages.{stage_name}.$.status": status,
-                        f"stages.{stage_name}.$.remarks": remarks
-                    }}
-                )
-
-                if status == "FAILED":
-                    fail_tag = f"{stage_name}_{check_name}"
-                    await verificationsCol.update_one(
-                        {"_id": verification_oid},
-                        {"$set": {
-                            "overallStatus": "FAILED",
-                            "failureStage": fail_tag,
-                            "currentStage": stage_name
-                        }}
-                    )
-                    if candidateObjId:
-                        await candidatesCol.update_one(
-                            {"_id": candidateObjId},
-                            {"$set": {"status": f"FAILED_AT_{fail_tag.upper()}"}}
-                        )
-                    await logActivity(
-                        {"email": "system"},
-                        "Verification Failed",
-                        f"Verification stopped at {fail_tag} for {candidate.get('firstName')} ({organizationName}) [{organizationId}]",
-                        "Error"
-                    )
-                    return
-
-            await asyncio.sleep(2)
-
-        # Everything passed
-        await verificationsCol.update_one(
-            {"_id": verification_oid},
-            {"$set": {"overallStatus": "COMPLETED", "currentStage": "final"}}
-        )
-        if candidateObjId:
-            await candidatesCol.update_one(
-                {"_id": candidateObjId},
-                {"$set": {"status": "VERIFIED"}}
-            )
-        await logActivity(
-            {"email": "system"},
-            "Verification Completed",
-            f"All stages passed for {candidate.get('firstName')} ({organizationName}) [{organizationId}]",
-            "Success"
-        )
-
-    except Exception as e:
-        try:
-            verification_oid = verification_id if isinstance(verification_id, ObjectId) else ObjectId(verification_id)
-            await verificationsCol.update_one(
-                {"_id": verification_oid},
-                {"$set": {"overallStatus": "FAILED", "error": str(e)}}
-            )
-        except Exception:
-            pass
-
-        try:
-            if candidate.get("_id"):
-                cid = candidate["_id"] if isinstance(candidate["_id"], ObjectId) else ObjectId(candidate["_id"])
-                await candidatesCol.update_one(
-                    {"_id": cid},
-                    {"$set": {"status": "FAILED_UNKNOWN_ERROR"}}
-                )
-        except Exception:
-            pass
-
-        await logActivity(
-            {"email": "system"},
-            "Verification Failed",
-            f"Error during verification pipeline: {str(e)} [{organizationName}]",
-            "Error"
-        )
-
-# -------------------------------------------------------------------------
-# ♻️ Retry only failed checks (auto-resume pipeline if all pass)
-# -------------------------------------------------------------------------
-async def retry_failed_checks(verification, failed_checks, candidate, user):
-    """
-    Retries failed checks with strict role and org-level access control.
-    ---------------------------------------------------------------
+    Controlled stage initiation (primary → secondary → final).
+    
     Rules:
-      - SUPER_ADMIN / BGV SPOC → can retry any verification
-      - SUPER_ADMIN_HELPER → only in accessibleOrganizations
-      - ORG_SPOC / ORG_HR → only their own organization
-      - HELPER → only their own initiated verifications
+      ✔ Candidate must belong to the given organizationId
+      ✔ User must be authorized to work on that organization
+      ✔ Only ONE stage per request
+      ✔ Cannot start secondary without primary completed
+      ✔ Cannot start final without secondary completed
+      ✔ If stage already exists:
+              - if completed → return completed
+              - if incomplete → return status (don't recreate)
+      ✔ If stage does not exist → append to verification or create new
     """
+
+    # Extract request body
+    candidateId = body.get("candidateId")
+    stagesIn = body.get("stages", {})
+    requestedOrgId = body.get("organizationId")
+
+    if not candidateId or not stagesIn:
+        raise HTTPException(status_code=400, detail="candidateId and stages are required")
+
+    # Exactly one stage must be provided
+    if len(stagesIn.keys()) != 1:
+        raise HTTPException(status_code=400, detail="Provide exactly one stage per request")
+
+    stageName = list(stagesIn.keys())[0]  # primary / secondary / final
+    stageList = stagesIn.get(stageName) or []
+
+    if not isinstance(stageList, list) or len(stageList) == 0:
+        raise HTTPException(status_code=400, detail="Stage must contain at least one check")
+
+    # -------------------------------
+    # VALIDATE CANDIDATE
+    # -------------------------------
     try:
-        role = user.get("role")
-        userEmail = user.get("email", "").lower().strip()
-        userOrgId = str(user.get("organizationId"))
-        accessibleOrgs = [str(x) for x in user.get("accessibleOrganizations", [])]
+        candidateObjId = ObjectId(candidateId)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid candidateId")
 
-        verification_oid = verification["_id"] if isinstance(verification["_id"], ObjectId) else ObjectId(verification["_id"])
-        verificationOrgId = str(verification.get("organizationId", ""))  # ensure string form
-        initiatedBy = verification.get("initiatedBy", "").lower().strip()
+    candidate = await candidatesCol.find_one({"_id": candidateObjId})
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
 
-        # --------------------------------------------
-        # 🔒 Role-based access validation
-        # --------------------------------------------
-        if role == "SUPER_ADMIN":
-            pass  # full access
+    candidateOrgId = str(candidate.get("organizationId"))
 
-        elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
-            pass  # BGV global SPOC, full access
+    # -------------------------------
+    # CHECK IF CANDIDATE BELONGS TO GIVEN ORG
+    # -------------------------------
+    if candidateOrgId != requestedOrgId:
+        raise HTTPException(
+            status_code=403,
+            detail="Candidate does not belong to the given organization"
+        )
 
-        elif role == "SUPER_ADMIN_HELPER":
-            if verificationOrgId not in accessibleOrgs:
-                raise HTTPException(status_code=403, detail="Not authorized for this organization")
+    # -------------------------------
+    # ROLE → ORG ACCESS CONTROL
+    # -------------------------------
+    role = user.get("role")
+    userEmail = user.get("email", "").lower().strip()
+    userOrgId = str(user.get("organizationId"))
+    accessible = [str(x) for x in user.get("accessibleOrganizations", [])]
 
-        elif role in ["ORG_SPOC", "ORG_HR"]:
-            if verificationOrgId != userOrgId:
-                raise HTTPException(status_code=403, detail="You can only retry verifications in your organization")
+    # SUPER_ADMIN → all orgs allowed
+    if role == "SUPER_ADMIN":
+        pass
 
-        elif role == "HELPER":
-            if initiatedBy != userEmail:
-                raise HTTPException(status_code=403, detail="You can only retry your own verifications")
+    # BGV SPOC → all orgs allowed
+    elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
+        pass
 
-        else:
-            raise HTTPException(status_code=403, detail="You are not authorized to retry verifications")
+    # SUPER_ADMIN_HELPER → only allocated orgs
+    elif role == "SUPER_ADMIN_HELPER":
+        if requestedOrgId not in accessible:
+            raise HTTPException(status_code=403, detail="Not authorized for this organization")
 
-        # --------------------------------------------
-        # ✅ Retry each failed check
-        # --------------------------------------------
-        for stage_name, check_name in failed_checks:
+    # ORG_SPOC / ORG_HR → only their org
+    elif role in ["ORG_HR", "SPOC"]:
+        if requestedOrgId != userOrgId:
+            raise HTTPException(status_code=403, detail="Not authorized for this organization")
+
+    # HELPER → only own candidates and same org
+    elif role == "HELPER":
+        if requestedOrgId != userOrgId:
+            raise HTTPException(status_code=403, detail="Not authorized for this organization")
+        if candidate.get("createdBy", "").lower().strip() != userEmail:
+            raise HTTPException(status_code=403, detail="You can only access candidates created by you")
+
+    else:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    # -------------------------------
+    # ENSURE ORGANIZATION EXISTS
+    # -------------------------------
+    try:
+        org = await orgsCol.find_one({"_id": ObjectId(requestedOrgId)})
+    except:
+        org = None
+
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    organizationName = org.get("organizationName")
+
+    # -------------------------------
+    # CHECK EXISTING VERIFICATION DOC
+    # -------------------------------
+    ver = await verificationsCol.find_one({
+        "candidateId": candidateId,
+        "organizationId": requestedOrgId
+    })
+
+    # Helper to build check objects
+    def buildChecks(chkList):
+        return [{"check": c, "status": "NOT_STARTED", "remarks": None,
+                 "attachments": [], "submittedAt": None} for c in chkList]
+
+    newChecks = buildChecks(stageList)
+
+    # -------------------------------
+    # IF VERIFICATION EXISTS
+    # -------------------------------
+    if ver:
+
+        existingStages = ver.get("stages", {})
+
+        # ------------------------------------
+        # BLOCK STAGE-JUMPING
+        # ------------------------------------
+        if stageName == "secondary" and "primary" not in existingStages:
+            raise HTTPException(status_code=403, detail="Primary stage must be completed first")
+
+        if stageName == "final" and ("secondary" not in existingStages):
+            raise HTTPException(status_code=403, detail="Secondary stage must be completed first")
+
+        # ------------------------------------
+        # IF STAGE ALREADY EXISTS
+        # ------------------------------------
+        if stageName in existingStages:
+            statuses = [c.get("status") for c in existingStages[stageName]]
+
+            if all(s == "COMPLETED" for s in statuses):
+                return {
+                    "message": f"Stage '{stageName}' already completed",
+                    "stageStatus": "COMPLETED",
+                    "verificationId": str(ver["_id"]),
+                    "stages": ver["stages"]
+                }
+
+            return {
+                "message": f"Stage '{stageName}' already exists and is incomplete",
+                "stageStatus": "INCOMPLETE",
+                "verificationId": str(ver["_id"]),
+                "stages": ver["stages"]
+            }
+
+        # ------------------------------------
+        # ADD NEW STAGE TO EXISTING VERIFICATION
+        # ------------------------------------
+        existingStages[stageName] = newChecks
+
+        newStatus = ver.get("overallStatus", "PENDING")
+        if newStatus == "COMPLETED":
+            newStatus = "PENDING"
+
+        await verificationsCol.update_one(
+            {"_id": ver["_id"]},
+            {"$set": {
+                "stages": existingStages,
+                "overallStatus": newStatus,
+                "currentStage": stageName
+            }}
+        )
+
+        return {
+            "message": f"Stage '{stageName}' added to existing verification",
+            "verificationId": str(ver["_id"]),
+            "stage": stageName
+        }
+
+    # -------------------------------
+    # CREATE NEW VERIFICATION DOC
+    # -------------------------------
+    now = datetime.now(timezone.utc).isoformat()
+
+    verificationDoc = {
+        "candidateId": candidateId,
+        "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
+        "organizationId": requestedOrgId,
+        "organizationName": organizationName,
+        "initiatedBy": userEmail,
+        "initiatedAt": now,
+        "mode": "MANUAL",
+        "stages": {stageName: newChecks},
+        "currentStage": stageName,
+        "overallStatus": "PENDING",
+        "assignedTo": str(user.get("_id")),
+        "remarks": []
+    }
+
+    res = await verificationsCol.insert_one(verificationDoc)
+
+    return {
+        "message": f"Verification created with stage '{stageName}'",
+        "verificationId": str(res.inserted_id),
+        "stage": stageName
+    }
+
+@app.post("/secure/runStage")
+async def runStage(body: dict = Body(...), user: dict = Depends(requireAuth)):
+    """
+    Run a verification stage with FULL role/org/initiation access control.
+    """
+
+    verificationId = body.get("verificationId")
+    stage = body.get("stage")
+
+    if not verificationId or not stage:
+        raise HTTPException(status_code=400, detail="verificationId and stage are required")
+
+    # Validate verificationId
+    try:
+        verObjId = ObjectId(verificationId)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid verificationId")
+
+    ver = await verificationsCol.find_one({"_id": verObjId})
+    if not ver:
+        raise HTTPException(status_code=404, detail="Verification not found")
+
+    verificationOrgId = str(ver.get("organizationId"))
+    candidateId = ver.get("candidateId")
+    initiatedBy = ver.get("initiatedBy", "").lower().strip()
+
+    # Load candidate
+    candidate = await candidatesCol.find_one({"_id": ObjectId(candidateId)})
+
+    # -------------------------------------------------------
+    # 🛡 ROLE, ORG, INITIATED-BY ACCESS CONTROL
+    # -------------------------------------------------------
+    role = user.get("role")
+    userEmail = user.get("email", "").lower().strip()
+    userOrgId = str(user.get("organizationId"))
+    accessible = [str(x) for x in user.get("accessibleOrganizations", [])]
+
+    allowed = False
+
+    # SUPER ADMIN → full access
+    if role == "SUPER_ADMIN":
+        allowed = True
+
+    # BGV SPOC → full access
+    elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
+        allowed = True
+
+    # SUPER_ADMIN_HELPER → only inside assigned orgs
+    elif role == "SUPER_ADMIN_HELPER":
+        if verificationOrgId in accessible:
+            allowed = True
+
+    # ORG_SPOC / ORG_HR → only if they created the verification
+    elif role in ["ORG_HR", "SPOC"]:
+        if verificationOrgId == userOrgId and initiatedBy == userEmail:
+            allowed = True
+
+    # HELPER → only if candidate created by them AND verification initiated by them
+    elif role == "HELPER":
+        if (verificationOrgId == userOrgId and 
+            candidate.get("createdBy", "").lower().strip() == userEmail and
+            initiatedBy == userEmail):
+            allowed = True
+
+    if not allowed:
+        raise HTTPException(status_code=403, detail="You are not authorized to run this stage")
+
+    # -------------------------------------------------------
+    # VALIDATE STAGE EXISTS
+    # -------------------------------------------------------
+    stageChecks = ver.get("stages", {}).get(stage)
+    if stageChecks is None:
+        raise HTTPException(status_code=404, detail=f"Stage '{stage}' not found")
+
+    # -------------------------------------------------------
+    # BLOCK STAGE JUMPING
+    # -------------------------------------------------------
+    stagesExisting = ver.get("stages", {})
+    if stage == "secondary" and "primary" not in stagesExisting:
+        raise HTTPException(status_code=403, detail="Primary stage must be completed first")
+
+    if stage == "final" and "secondary" not in stagesExisting:
+        raise HTTPException(status_code=403, detail="Secondary stage must be completed first")
+
+    # -------------------------------------------------------
+    # ALREADY COMPLETED → just return
+    # -------------------------------------------------------
+    if all(ch.get("status") == "COMPLETED" for ch in stageChecks):
+        return {
+            "message": f"Stage '{stage}' already completed",
+            "verificationId": verificationId,
+            "stage": stage
+        }
+
+    # -------------------------------------------------------
+    # RUN ALL CHECKS
+    # -------------------------------------------------------
+    for idx, ch in enumerate(stageChecks):
+
+        checkName = ch.get("check")
+        currentStatus = (ch.get("status") or "NOT_STARTED").upper()
+
+        if currentStatus == "COMPLETED":
+            continue
+
+        # Mark IN_PROGRESS
+        await verificationsCol.update_one(
+            {"_id": verObjId},
+            {"$set": {
+                f"stages.{stage}.{idx}.status": "IN_PROGRESS",
+                "currentStage": stage
+            }}
+        )
+
+        # Run verifier
+        try:
+            status, remarks = await run_verification(checkName, candidate)
+        except Exception as e:
+            status, remarks = "FAILED", f"Runtime error: {str(e)}"
+
+        # Update
+        await verificationsCol.update_one(
+            {"_id": verObjId},
+            {"$set": {
+                f"stages.{stage}.{idx}.status": status,
+                f"stages.{stage}.{idx}.remarks": remarks,
+                f"stages.{stage}.{idx}.submittedAt": datetime.now(timezone.utc).isoformat()
+            }}
+        )
+
+        # If failure -> stop
+        if status == "FAILED":
             await verificationsCol.update_one(
-                {"_id": verification_oid, f"stages.{stage_name}.check": check_name},
-                {"$set": {f"stages.{stage_name}.$.status": "IN_PROGRESS"}}
-            )
-
-            try:
-                status, remarks = await run_verification(check_name, candidate)
-            except Exception as e:
-                status, remarks = "FAILED", f"Runtime error in {check_name}: {str(e)}"
-
-            await verificationsCol.update_one(
-                {"_id": verification_oid, f"stages.{stage_name}.check": check_name},
+                {"_id": verObjId},
                 {"$set": {
-                    f"stages.{stage_name}.$.status": status,
-                    f"stages.{stage_name}.$.remarks": remarks
+                    "overallStatus": "FAILED",
+                    "failureStage": f"{stage}_{checkName}",
+                    "currentStage": stage
                 }}
             )
-
-        # --------------------------------------------
-        # 🔍 Evaluate results after retries
-        # --------------------------------------------
-        updated_verification = await verificationsCol.find_one({"_id": verification_oid})
-
-        failed_any = any(
-            ch.get("status") == "FAILED"
-            for stg in ["primary", "secondary", "final"]
-            for ch in (updated_verification["stages"].get(stg, []) or [])
-        )
-
-        # --------------------------------------------
-        # ❌ If still failed
-        # --------------------------------------------
-        if failed_any:
-            await verificationsCol.update_one(
-                {"_id": verification_oid},
-                {"$set": {"overallStatus": "FAILED"}}
+            await candidatesCol.update_one(
+                {"_id": ObjectId(candidateId)},
+                {"$set": {"status": f"FAILED_AT_{stage}_{checkName}"}}
             )
-            cid = updated_verification.get("candidateId")
-            if cid:
-                await candidatesCol.update_one(
-                    {"_id": ObjectId(cid)},
-                    {"$set": {"status": "FAILED_RETRY"}}
-                )
             await logActivity(
                 user,
-                "Retry Verification Failed",
-                f"Reattempted checks failed again for {updated_verification.get('candidateName')}",
+                "Run Stage Failed",
+                f"Verification {verificationId} failed at {stage}_{checkName}",
                 "Error"
             )
-            return
+            return {
+                "message": "Check failed",
+                "failedCheck": checkName,
+                "status": "FAILED"
+            }
 
-        # --------------------------------------------
-        # ✅ All checks passed — resume verification
-        # --------------------------------------------
-        await verificationsCol.update_one(
-            {"_id": verification_oid},
-            {"$set": {"overallStatus": "IN_PROGRESS", "failureStage": None}}
-        )
+    # -------------------------------------------------------
+    # MARK STAGE COMPLETED
+    # -------------------------------------------------------
+    await verificationsCol.update_one(
+        {"_id": verObjId},
+        {"$set": {
+            "currentStage": stage,
+            "overallStatus": "IN_PROGRESS"
+        }}
+    )
 
-        fresh_candidate = candidate
-        if not candidate.get("_id") and updated_verification.get("candidateId"):
-            try:
-                fresh_candidate = await candidatesCol.find_one({"_id": ObjectId(updated_verification["candidateId"])})
-            except Exception:
-                pass
+    await logActivity(
+        user,
+        "Run Stage Success",
+        f"Completed stage {stage} for verification {verificationId}",
+        "Success"
+    )
 
-        await logActivity(
-            user,
-            "Retry Verification Success",
-            f"All failed checks fixed for {updated_verification.get('candidateName')}, resuming pipeline...",
-            "Success"
-        )
+    return {"message": "Stage completed", "stage": stage, "verificationId": verificationId}
 
-        asyncio.create_task(
-            process_verification_pipeline(
-                verification_oid,
-                fresh_candidate or candidate,
-                updated_verification["stages"]
-            )
-        )
+@app.post("/secure/retryCheck")
+async def retryCheck(body: dict = Body(...), user: dict = Depends(requireAuth)):
+    """
+    Body:
+      - verificationId (str)
+      - stage (str)
+      - check (str)  <-- the 'check' key name like 'pan' etc.
+    Behavior:
+      - Validates verification existence and that the specific check exists and is in FAILED state.
+      - Only then re-runs that single check. If passes -> set to COMPLETED. If fails -> remains FAILED.
+      - Returns the new status and remarks.
+    """
+    verificationId = body.get("verificationId")
+    stage = body.get("stage")
+    checkKey = body.get("check")
 
-    except HTTPException:
-        raise
+    if not verificationId or not stage or not checkKey:
+        raise HTTPException(status_code=400, detail="verificationId, stage and check are required")
+
+    try:
+        verObjId = ObjectId(verificationId)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid verificationId")
+
+    ver = await verificationsCol.find_one({"_id": verObjId})
+    if not ver:
+        raise HTTPException(status_code=404, detail="Verification not found")
+
+    stageChecks = ver.get("stages", {}).get(stage)
+    if stageChecks is None:
+        raise HTTPException(status_code=404, detail="Stage not found")
+
+    # find the index and current status
+    idx = None
+    for i, ch in enumerate(stageChecks):
+        if ch.get("check") == checkKey:
+            idx = i
+            break
+    if idx is None:
+        raise HTTPException(status_code=404, detail="Check not found in stage")
+
+    currentStatus = stageChecks[idx].get("status", "NOT_STARTED").upper()
+
+    # Only allow retry if current status is FAILED
+    if currentStatus != "FAILED":
+        return JSONResponse(status_code=400, content={
+            "message": "Check is not in FAILED state and cannot be retried",
+            "currentStatus": currentStatus
+        })
+
+    # Optional: authorization checks (same as your retry_failed_checks rules)
+    verificationOrgId = str(ver.get("organizationId", ""))
+    userEmail = user.get("email", "").lower().strip()
+    accessibleOrgs = [str(x) for x in user.get("accessibleOrganizations", [])]
+    role = user.get("role")
+
+    # enforce simple role-based permission (same rules as earlier)
+    if role == "SUPER_ADMIN":
+        pass
+    elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
+        pass
+    elif role == "SUPER_ADMIN_HELPER":
+        if verificationOrgId not in accessibleOrgs:
+            raise HTTPException(status_code=403, detail="Not authorized for this organization")
+    elif role in ["ORG_HR", "SPOC"]:
+        if verificationOrgId != str(user.get("organizationId")):
+            raise HTTPException(status_code=403, detail="You can only retry checks in your organization")
+    elif role == "HELPER":
+        # ensure helper initiated this verification
+        if (ver.get("initiatedBy","").lower().strip() != userEmail):
+            raise HTTPException(status_code=403, detail="You can only retry checks for verifications you initiated")
+    else:
+        raise HTTPException(status_code=403, detail="Not authorized to retry checks")
+
+    # mark IN_PROGRESS
+    await verificationsCol.update_one({"_id": verObjId}, {"$set": {f"stages.{stage}.{idx}.status": "IN_PROGRESS", f"stages.{stage}.{idx}.submittedAt": datetime.now(timezone.utc).isoformat()}})
+
+    # run the check
+    try:
+        status, remarks = await run_verification(checkKey, await candidatesCol.find_one({"_id": ObjectId(ver["candidateId"])}) )
     except Exception as e:
-        await logActivity(user, "Retry Verification Error", str(e), "Error")
-        raise HTTPException(status_code=500, detail=f"Error retrying verifications: {str(e)}")
+        status, remarks = "FAILED", f"Runtime error: {str(e)}"
 
+    updateFields = {
+        f"stages.{stage}.{idx}.status": status,
+        f"stages.{stage}.{idx}.remarks": remarks,
+        f"stages.{stage}.{idx}.submittedAt": datetime.now(timezone.utc).isoformat()
+    }
+    await verificationsCol.update_one({"_id": verObjId}, {"$set": updateFields})
+
+    if status == "FAILED":
+        # leave overall as FAILED
+        await verificationsCol.update_one({"_id": verObjId}, {"$set": {"overallStatus": "FAILED", "failureStage": f"{stage}_{checkKey}"}})
+        await candidatesCol.update_one({"_id": ObjectId(ver["candidateId"])}, {"$set": {"status": f"FAILED_AT_{stage}_{checkKey}"}})
+        await logActivity(user, "Retry Check", f"Retry of {checkKey} failed for verification {verificationId}", "Error")
+        return JSONResponse(status_code=200, content={"check": checkKey, "status": "FAILED", "remarks": remarks})
+
+    # If passed:
+    # Check if entire stage all COMPLETED now -> set stage completed (client will decide next stage)
+    verLatest = await verificationsCol.find_one({"_id": verObjId})
+    stageAll = verLatest.get("stages", {}).get(stage, [])
+    if all(ch.get("status") == "COMPLETED" for ch in stageAll):
+        # if no other stages -> leave overall IN_PROGRESS; client will initiate next stage
+        await verificationsCol.update_one({"_id": verObjId}, {"$set": {"overallStatus": "IN_PROGRESS", "currentStage": stage}})
+        await logActivity(user, "Retry Check", f"Retry of {checkKey} succeeded and stage {stage} completed for {verificationId}", "Success")
+
+    return JSONResponse(status_code=200, content={"check": checkKey, "status": status, "remarks": remarks})
 
 # -------------------------------------------------------------------------
 # 🚦 Initiate Verification (your original function — unchanged)
@@ -2871,7 +3365,7 @@ async def getActivityLogs(user: dict = Depends(requireAuth)):
         query["organizationId"] = user.get("organizationId")
 
     cursor = activityLogsCol.find(query).sort("timestamp", -1)
-    logs = await cursor.to_list(length=200)
+    logs = await cursor.to_list()
 
     # Convert ObjectIds to string for each log (same convention as other functions)
     for log in logs:
