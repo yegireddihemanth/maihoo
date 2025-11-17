@@ -50,7 +50,7 @@ from email.mime.text import MIMEText
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-FRONTEND_SELF_VERIFY_URL = "https://maihoo.onrender.com/self-verify"
+FRONTEND_SELF_VERIFY_URL = "https://marcellus-intricate-khadijah.ngrok-free.dev/candidate/self-verification"
 
 # SCOPES used for Gmail API
 SCOPES = ["https://www.googleapis.com/auth/gmail.send"]

@@ -1329,7 +1329,18 @@ from fastapi.encoders import jsonable_encoder
 import math
 from datetime import datetime, timezone
 from bson import ObjectId
+# ============================
+# REQUIRED IMPORTS (ONLY ADDITIONS)
+# ============================
+import math
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
+from bson import ObjectId
 
+# If your logActivity is in utils.activity_logger
+
+# If it's somewhere else, update the path properly.
+# ============================
 @app.get("/secure/getVerifications")
 async def getVerifications(
     candidateId: Optional[str] = Query(None),
@@ -1409,8 +1420,21 @@ async def getVerifications(
 
         for stage_name, checks in v.get("stages", {}).items():
             for check in checks:
+
+                # ---------------------------------------------------
+                # 🔥 FIX: Prevent crash when DB contains raw strings
+                # ---------------------------------------------------
+                if isinstance(check, str):
+                    check = {
+                        "check": check,
+                        "status": "NOT_STARTED",
+                        "remarks": None
+                    }
+                # ---------------------------------------------------
+
                 totalChecks += 1
                 status = check.get("status", "NOT_STARTED")
+
                 if status == "COMPLETED":
                     completedChecks += 1
                 elif status == "FAILED":
