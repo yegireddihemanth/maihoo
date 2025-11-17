@@ -67,6 +67,13 @@ async def verify_cibil(candidate_name: str):
 
 
 # -----------------------
+# 🆕 NEW — Address Verification
+# -----------------------
+async def verify_address(candidate_name: str):
+    return await simulate_processing("Address Verification")
+
+
+# -----------------------
 # 🚦 Dispatcher (Router)
 # -----------------------
 async def run_verification(check_type: str, candidate: dict):
@@ -96,6 +103,10 @@ async def run_verification(check_type: str, candidate: dict):
         return await verify_employment(candidate.get("firstName"))
     elif check_type in ["cibil", "cibil_report", "cibil_score"]:
         return await verify_cibil(candidate.get("firstName"))
+
+    # --- NEW: Address verification ---
+    elif check_type in ["address", "address_verification", "addresscheck", "address_check"]:
+        return await verify_address(candidate.get("firstName"))
 
     # ❌ Unknown type fallback
     else:

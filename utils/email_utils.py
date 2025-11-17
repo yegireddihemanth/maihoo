@@ -13,24 +13,21 @@ FROM_EMAIL = "hemanthdevapple@gmail.com"
 FRONTEND_SELF_VERIFY_URL = "https://maihoo.onrender.com/self-verify"
 
 def send_self_verification_email(to_email, candidateName, organizationName,
-                                 candidateId, organizationId, aadhaarLast4):
+                                 stage, token, expiresAt):
 
-    link = FRONTEND_SELF_VERIFY_URL
+    link = f"{FRONTEND_SELF_VERIFY_URL}?token={token}"
 
     body = f"""
 Hi {candidateName},
 
-You have been selected for self-verification for {organizationName}.
+You have been requested to complete the {stage.upper()} stage verification 
+for {organizationName}.
 
-Use the details below to log in:
+Stage: {stage}
+Verification Link: {link}
+This link will expire at: {expiresAt}
 
-Candidate ID: {candidateId}
-Organization ID: {organizationId}
-Email: {to_email}
-Aadhaar Last 4 Digits: {aadhaarLast4}
-
-Verification Link:
-{link}
+If you did not request this, please contact your HR/Verification team.
 
 Thanks,
 {organizationName} Verification Team
@@ -39,7 +36,7 @@ Thanks,
     msg = MIMEMultipart()
     msg["From"] = FROM_EMAIL
     msg["To"] = to_email
-    msg["Subject"] = f"Self Verification - {organizationName}"
+    msg["Subject"] = f"{stage.capitalize()} Stage Verification - {organizationName}"
     msg.attach(MIMEText(body, "plain"))
 
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
