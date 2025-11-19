@@ -22,7 +22,7 @@ from bson import ObjectId
 from bson.errors import InvalidId
 import asyncio
 from apis import run_verification  # ← Import dummy verification dispatcher
-from utils.email_utils import send_self_verification_email
+from utils.email_utils import send_self_verification_email, send_organization_welcome_email
 from utils.email_utils import  send_self_verification_email
 from fastapi import Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -309,27 +309,36 @@ async def registerOrganization(body: OrganizationRegistration, user: dict = Depe
     if not (role == "SUPER_ADMIN" or isGlobalSpoc):
         raise HTTPException(status_code=403, detail="Only Super Admin or Global SPOC can add organizations")
 
-
+    # Auto-generate subdomain if not provided
     cleanOrgName = body.organizationName.split()[0].lower()
     autoSubDomain = body.subDomain or f"{cleanOrgName}.bgvapp.in"
 
-    existingOrg = await orgsCol.find_one({
-        "$or": [
-            {"email": body.email},
-            {"mainDomain": body.mainDomain},
-            {"subDomain": autoSubDomain}
-        ]
-    })
+    # -----------------------------------------
+    # UPDATED: duplicate check with optional mainDomain
+    # -----------------------------------------
+    duplicateQuery = [
+        {"email": body.email},
+        {"subDomain": autoSubDomain}
+    ]
+
+    if body.mainDomain:   # include only if provided
+        duplicateQuery.append({"mainDomain": body.mainDomain})
+
+    existingOrg = await orgsCol.find_one({"$or": duplicateQuery})
+
     if existingOrg:
         await logActivity(user, "Register Organization Failed", f"Duplicate org: {body.email}", "Error")
         raise HTTPException(status_code=409, detail="Organization with same email or domain already exists")
 
     now = datetime.now(timezone.utc).isoformat()
 
+    # -----------------------------------------
+    # UPDATED: mainDomain may be None
+    # -----------------------------------------
     orgDoc = {
         "organizationName": body.organizationName,
         "spocName": body.spocName,
-        "mainDomain": body.mainDomain,
+        "mainDomain": body.mainDomain or None,
         "subDomain": autoSubDomain,
         "phone": body.phone,
         "email": body.email,
@@ -376,6 +385,22 @@ async def registerOrganization(body: OrganizationRegistration, user: dict = Depe
         f"Created org '{body.organizationName}' with SPOC '{body.email}'",
         "Success"
     )
+        # --- Send welcome email to SPOC ---
+    try:
+        send_organization_welcome_email(
+            toEmail=body.email,
+            organizationName=body.organizationName,
+            spocName=body.spocName,
+            loginEmail=body.email,
+            defaultPassword="Welcome1",
+            mainDomain=body.mainDomain,
+            subDomain=autoSubDomain,
+            services=[s.dict() for s in body.services],
+            credentials=body.credentials.dict(),
+            logoUrl=body.logoUrl
+        )
+    except Exception as e:
+        print("Failed to send organization welcome email:", str(e))
 
     return JSONResponse(
         status_code=201,
@@ -388,6 +413,8 @@ async def registerOrganization(body: OrganizationRegistration, user: dict = Depe
             "note": "SPOC can now log in and add HR/Admin users if needed."
         })
     )
+
+
 
 
 # ✅ Permission guard (import or place at the top of your routes file)
@@ -3562,6 +3589,135 @@ async def getActivityLogs(user: dict = Depends(requireAuth)):
             "logs": logs
         })
     )
+
+
+from fastapi import APIRouter, Body, HTTPException
+import re
+from bson import ObjectId
+from utils.email_utils import send_password_reset_email
+
+
+def validatePassword(pwd: str):
+    if len(pwd) < 8:
+        return False
+    if not re.search(r"[A-Z]", pwd):
+        return False
+    if not re.search(r"[0-9]", pwd):
+        return False
+    if not re.search(r"[\W_]", pwd):
+        return False
+    return True
+
+
+@app.post("/auth/resetPassword")
+async def resetPassword(
+    body: dict = Body(...),
+    authUser: dict = Depends(requireAuth)  # logged-in user
+):
+    email = body.get("email", "").lower().strip()
+    phone = body.get("phone", "").strip()
+    currentPassword = body.get("currentPassword", "").strip()
+    newPassword = body.get("newPassword", "").strip()
+
+    if not email or not phone or not currentPassword or not newPassword:
+        await logActivity(
+            authUser,
+            "Password Reset Failed",
+            "Missing required fields",
+            "Error"
+        )
+        raise HTTPException(status_code=400, detail="All fields are required")
+
+    # -----------------------------------------------------
+    # SECURITY RULE: Only logged-in user can reset their own password
+    # -----------------------------------------------------
+    if authUser.get("email", "").lower().strip() != email:
+        await logActivity(
+            authUser,
+            "Password Reset Failed",
+            f"Unauthorized attempt to reset password for {email}",
+            "Error"
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="You can only change your own password"
+        )
+
+    # Fetch user
+    user = await usersCol.find_one({"email": email})
+    if not user:
+        await logActivity(
+            authUser,
+            "Password Reset Failed",
+            f"User not found: {email}",
+            "Error"
+        )
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Phone match (phone or phoneNumber)
+    storedPhone = user.get("phone") or user.get("phoneNumber")
+    if not storedPhone or str(storedPhone).strip() != str(phone).strip():
+        await logActivity(
+            authUser,
+            "Password Reset Failed",
+            "Phone number does not match",
+            "Error"
+        )
+        raise HTTPException(status_code=400, detail="Phone number does not match")
+
+    # Current password match
+    if user.get("password") != currentPassword:
+        await logActivity(
+            authUser,
+            "Password Reset Failed",
+            "Current password incorrect",
+            "Error"
+        )
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+    # Validate new password
+    if not validatePassword(newPassword):
+        await logActivity(
+            authUser,
+            "Password Reset Failed",
+            "Password does not meet strength requirements",
+            "Error"
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="Password must be at least 8 chars, include 1 uppercase, 1 number and 1 special character"
+        )
+
+    # Update password
+    await usersCol.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"password": newPassword}}
+    )
+
+    # Send email
+    try:
+        send_password_reset_email(
+            toEmail=email,
+            userName=user.get("userName", "User"),
+            userId=str(user.get("_id")),
+            newPassword=newPassword
+        )
+        emailStatus = "Email sent successfully"
+    except Exception as e:
+        print("Email sending failed:", str(e))
+        emailStatus = f"Email sending failed: {str(e)}"
+
+    # Log successful reset
+    await logActivity(
+        authUser,
+        "Password Reset",
+        f"Password changed for user {email}. {emailStatus}",
+        "Success"
+    )
+
+    return {
+        "message": "Password updated and email sent successfully"
+    }
 
 
 # -------------------------------

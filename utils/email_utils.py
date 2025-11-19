@@ -106,3 +106,141 @@ Thanks,
     except Exception as e:
         print("Error sending email:", str(e))
         raise Exception(f"GMAIL API ERROR: {str(e)}")
+
+
+def send_password_reset_email(toEmail, userName, userId, newPassword):
+    """
+    Sends an email notification to the user after password reset.
+    Includes username and new password.
+    """
+
+    body = f"""
+Hi {userName},
+
+Your password has been successfully reset.
+
+Here are your updated login credentials:
+
+User ID (Email): {toEmail}
+User Unique ID: {userId}
+New Password: {newPassword}
+
+For security reasons, please do not share this password with anyone.
+
+If you did not request this reset, please contact the support team immediately.
+
+Thanks,
+Maihoo Verification Team
+"""
+
+    message = MIMEText(body)
+    message["to"] = toEmail
+    message["from"] = "me"
+    message["subject"] = "Password Reset Confirmation - Maihoo"
+
+    rawMessage = base64.urlsafe_b64encode(message.as_bytes()).decode()
+
+    try:
+        service = _load_gmail_service()
+        service.users().messages().send(
+            userId="me",
+            body={"raw": rawMessage}
+        ).execute()
+
+        print("Password reset email sent to:", toEmail)
+    except Exception as e:
+        print("Error sending password reset email:", str(e))
+        raise Exception(f"GMAIL API ERROR: {str(e)}")
+
+def send_organization_welcome_email(
+    toEmail,
+    organizationName,
+    spocName,
+    loginEmail,
+    defaultPassword,
+    mainDomain,
+    subDomain,
+    services,
+    credentials,
+    logoUrl=None
+):
+    """
+    Sends a welcome email when a new organization is registered.
+    Includes login details for the SPOC.
+    """
+
+    # Convert services list to readable text (e.g., "- Employment Verification: 120.0")
+    servicesText = ""
+    if services:
+        for s in services:
+            servicesText += f"- {s.get('serviceName')}: {s.get('price')}\n"
+    else:
+        servicesText = "No services added yet.\n"
+
+    credentialsText = f"""
+Total Allowed Users: {credentials.get('totalAllowed')}
+Users Used: {credentials.get('used')}
+""".strip()
+
+    body = f"""
+Hello {spocName},
+
+Welcome to the BGVApp Platform!
+
+Your organization **{organizationName}** has been successfully registered.
+
+-------------------------
+LOGIN CREDENTIALS
+-------------------------
+Login Email: {loginEmail}
+Default Password: {defaultPassword}
+
+Please log in and change your password immediately.
+
+-------------------------
+ORGANIZATION DETAILS
+-------------------------
+Organization Name: {organizationName}
+Main Domain: {mainDomain or 'Not Provided'}
+Subdomain: {subDomain}
+
+-------------------------
+PLAN/USAGE CREDENTIALS
+-------------------------
+{credentialsText}
+
+-------------------------
+SERVICES ENABLED
+-------------------------
+{servicesText}
+
+-------------------------
+LOGO
+-------------------------
+{logoUrl or 'No logo provided'}
+
+If you have any questions or need help setting up your workspace,
+please reach out to your support team.
+
+Thanks,
+BGVApp Team
+"""
+
+    message = MIMEText(body)
+    message["to"] = toEmail
+    message["from"] = "me"
+    message["subject"] = f"Welcome to BGVApp - {organizationName} Registration Successful"
+
+    rawMessage = base64.urlsafe_b64encode(message.as_bytes()).decode()
+
+    try:
+        service = _load_gmail_service()
+        service.users().messages().send(
+            userId="me",
+            body={"raw": rawMessage}
+        ).execute()
+
+        print("Organization registration email sent to:", toEmail)
+    except Exception as e:
+        print("Error sending organization welcome email:", str(e))
+        raise Exception(f"GMAIL API ERROR: {str(e)}")
