@@ -1989,12 +1989,17 @@ async def initiateStageVerification(body: dict = Body(...), user: dict = Depends
         "initiatedBy": userEmail,
         "initiatedAt": now,
         "mode": "MANUAL",
-        "stages": {stageName: newChecks},
+        "stages": {
+            "primary": newChecks if stageName == "primary" else [],
+            "secondary": newChecks if stageName == "secondary" else [],
+            "final": newChecks if stageName == "final" else []
+        },
         "currentStage": stageName,
         "overallStatus": "PENDING",
         "assignedTo": str(user.get("_id")),
         "remarks": []
     }
+
 
     res = await verificationsCol.insert_one(verificationDoc)
 
