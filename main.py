@@ -1892,9 +1892,18 @@ async def initiateStageVerification(body: dict = Body(...), user: dict = Depends
         def check_used(checkName):
             for st, chks in existingStages.items():
                 for c in chks:
-                    if c["check"] == checkName:
-                        return True
+                    # Case 1: old format → "pan"
+                    if isinstance(c, str):
+                        if c == checkName:
+                            return True
+
+                    # Case 2: new format → {"check": "pan", ...}
+                    elif isinstance(c, dict):
+                        if c.get("check") == checkName:
+                            return True
+
             return False
+
 
         # ❌ BLOCK duplicate checks ACROSS ALL STAGES
         for chk in stageList:
