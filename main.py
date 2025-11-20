@@ -9,7 +9,9 @@ import os, time, hmac, hashlib, base64, json
 from fastapi.middleware.cors import CORSMiddleware
 from bson import ObjectId
 from fastapi.encoders import jsonable_encoder
-
+from fastapi import UploadFile, File, HTTPException, Depends
+from config import *
+from bson import ObjectId
 from bson.errors import InvalidId
 from datetime import datetime, timezone
 from fastapi import Body, Depends, HTTPException
@@ -29,7 +31,8 @@ from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 from datetime import datetime, timezone
 from bson import ObjectId
-
+from fastapi import UploadFile, File, Form, Depends, HTTPException
+from utils.ai_utils import generate_resume_embeddings_and_rank
 
 # -------------------------------
 # Config
@@ -3718,6 +3721,259 @@ async def resetPassword(
     return {
         "message": "Password updated and email sent successfully"
     }
+
+
+
+
+@app.post("/secure/uploadLogo")
+async def uploadLogo(
+    file: UploadFile = File(...),
+    imageName: str = Form(None),   # <---- NEW
+    user: dict = Depends(requireAuth)
+):
+    # Validate file type
+    ext = file.filename.split(".")[-1].lower()
+    if ext not in ["jpg", "jpeg", "png"]:
+        await logActivity(
+            user,
+            "Upload Logo Failed",
+            f"Invalid file format ({ext})",
+            "Error"
+        )
+        raise HTTPException(status_code=400, detail="Only JPG/PNG files allowed")
+
+    # If no imageName provided → auto-generate unique name
+    if not imageName:
+        imageName = f"logo_{user.get('_id')}_{int(datetime.now().timestamp())}"
+
+    try:
+        # Upload with custom name
+        uploadResult = cloudinary.uploader.upload(
+            file.file,
+            folder="bgvapp/logos",
+            public_id=imageName,          # <----- THIS SETS THE CUSTOM NAME
+            overwrite=True,               # Replace if already exists
+            resource_type="image"
+        )
+
+        logoUrl = uploadResult.get("secure_url")
+
+        await logActivity(
+            user,
+            "Upload Logo",
+            f"Uploaded logo with name '{imageName}'",
+            "Success"
+        )
+
+        return {
+            "message": "Logo uploaded successfully",
+            "logoUrl": logoUrl,
+            "fileName": imageName
+        }
+
+    except Exception as e:
+        await logActivity(
+            user,
+            "Upload Logo Failed",
+            f"Cloudinary Error: {str(e)}",
+            "Error"
+        )
+        raise HTTPException(status_code=500, detail=f"Cloudinary upload failed: {str(e)}")
+
+
+
+@app.post("/secure/ai_resume_selection")
+async def ai_resume_selection(
+    jd: str = Form(...),
+    resumes: list[UploadFile] = File(...),
+    user: dict = Depends(requireAuth)
+):
+    if len(resumes) == 0:
+        raise HTTPException(status_code=400, detail="No resumes uploaded")
+    if len(resumes) > 100:
+        raise HTTPException(status_code=400, detail="Maximum 100 resumes allowed")
+
+    # NEW PIPELINE → Extract → Structure → Embedding → Score → Top 5
+    topFive, pipelineRunId = await generate_resume_embeddings_and_rank(resumes, jd)
+
+    return {
+        "message": "AI Resume Selection Completed",
+        "pipelineRunId": pipelineRunId,
+        "topFiveResumes": topFive
+    }
+
+
+# =================================================================
+#  ACCESS CONTROL (FULL)
+# =================================================================
+async def verify_certificate_access(user: dict, meta: dict):
+    role = user.get("role")
+    userOrgId = user.get("organizationId")
+    accessibleOrgs = user.get("accessibleOrganizations", [])
+    candidateOrgId = str(meta["organizationId"])
+    createdByEmail = meta["createdBy"]
+
+    # SUPER ADMIN — access all
+    if role == "SUPER_ADMIN":
+        return True
+
+    # SUPER ADMIN HELPER — only assigned orgs
+    if role == "SUPER_ADMIN_HELPER":
+        return candidateOrgId in accessibleOrgs
+
+    # ORG HR / ORG SPOC — only own org
+    if role in ["ORG_HR", "ORG_SPOC"]:
+        return candidateOrgId == str(userOrgId)
+
+    # HELPER — only candidates they added
+    if role == "HELPER":
+        return createdByEmail == user.get("email")
+
+    return False
+
+
+# =================================================================
+#  AGGREGATION PIPELINE (FULL)
+# =================================================================
+async def fetch_certificate_payload(candidateId: str):
+    pipeline = [
+        {
+            "$match": {
+                "$or": [
+                    {"_id": ObjectId(candidateId)},
+                    {"_id": candidateId}
+                ]
+            }
+        },
+
+        {
+            "$lookup": {
+                "from": "verifications",
+                "let": {"cid": {"$toString": "$_id"}},
+                "pipeline": [
+                    {
+                        "$match": {
+                            "$expr": {"$eq": ["$candidateId", "$$cid"]}
+                        }
+                    }
+                ],
+                "as": "verification"
+            }
+        },
+        {"$unwind": "$verification"},
+
+        {
+            "$lookup": {
+                "from": "organizations",
+                "let": {"oid": "$verification.organizationId"},
+                "pipeline": [
+                    {
+                        "$match": {
+                            "$expr": {"$eq": [{"$toString": "$_id"}, "$$oid"]}
+                        }
+                    }
+                ],
+                "as": "organization"
+            }
+        },
+        {
+            "$unwind": {
+                "path": "$organization",
+                "preserveNullAndEmptyArrays": True
+            }
+        },
+
+        {
+            "$lookup": {
+                "from": "users",
+                "localField": "createdBy",
+                "foreignField": "email",
+                "as": "creator"
+            }
+        },
+        {
+            "$unwind": {
+                "path": "$creator",
+                "preserveNullAndEmptyArrays": True
+            }
+        },
+
+        {
+            "$project": {
+                "_id": {"$toString": "$_id"},
+
+                "candidate": {
+                    "firstName": 1,
+                    "lastName": 1,
+                    "email": 1,
+                    "phone": 1,
+                    "address": 1,
+                    "aadhaarNumber": 1,
+                    "panNumber": 1,
+                    "passportNumber": 1,
+                    "dateOfBirth": 1,
+                    "status": 1,
+                    "createdAt": 1
+                },
+
+                "createdBy": {
+                    "email": "$creator.email",
+                    "name": "$creator.name",
+                    "role": "$creator.role"
+                },
+
+                "verification": {
+                    "verificationId": {"$toString": "$verification._id"},
+                    "initiatedBy": "$verification.initiatedBy",
+                    "initiatedAt": "$verification.initiatedAt",
+                    "initiationType": "$verification.initiationType",
+                    "organizationId": "$verification.organizationId",
+                    "organizationName": "$verification.organizationName",
+                    "stages": "$verification.stages",
+                    "overallStatus": "$verification.overallStatus",
+                    "currentStage": "$verification.currentStage",
+                    "completedAt": "$verification.completedAt"
+                },
+
+                "organization": {
+                    "name": "$organization.organizationName",
+                    "logo": "$organization.logo",
+                    "address": "$organization.address",
+                    "contact": "$organization.contact"
+                }
+            }
+        }
+    ]
+
+    data = await candidatesCol.aggregate(pipeline).to_list(1)
+    return data[0] if data else None
+
+
+# =================================================================
+#  FINAL ENDPOINT (FULL WORKING)
+# =================================================================
+@app.get("/secure/certificate/{candidateId}")
+async def getCertificateData(candidateId: str, user: dict = Depends(requireAuth)):
+
+    data = await fetch_certificate_payload(candidateId)
+    if not data:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    allowed = await verify_certificate_access(
+        user,
+        {
+            "organizationId": data["verification"]["organizationId"],
+            "createdBy": data["createdBy"]["email"]
+        }
+    )
+
+    if not allowed:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    return JSONResponse(
+        status_code=200,
+        content={"success": True, "certificate": data}
+    )
 
 
 # -------------------------------

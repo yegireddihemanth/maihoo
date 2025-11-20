@@ -1,14 +1,10 @@
-import asyncio
-from apis import run_verification
+from google import genai
 
-async def main():
-    result = await run_verification(
-        "aadhaar_pan_link",
-        {
-            "aadhaarNumber": "451741335167",
+client = genai.Client(api_key="AIzaSyAM_zHkubqWU4qkfzdnJiz8hzFwJoITjCs")
 
-        }
-    )
-    print(result)
+response = client.models.generate_content(
+    model="gemini-2.5-flash",
+    contents="Explain how AI works in a few words",
+)
 
-asyncio.run(main())
+print(response.text)
