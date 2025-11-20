@@ -12,7 +12,20 @@ from sentence_transformers import util
 # GOOGLE GEMINI CONFIG
 # -----------------------------------------------------
 from google import genai
-client = genai.Client(api_key="AIzaSyAM_zHkubqWU4qkfzdnJiz8hzFwJoITjCs")
+from dotenv import load_dotenv
+import os
+
+# Load .env (important!)
+load_dotenv()
+
+GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+
+if not GEMINI_KEY:
+    raise ValueError("GEMINI_API_KEY is missing! Set it in .env or Render environment variables.")
+
+client = genai.Client(api_key=GEMINI_KEY)
+
+
 
 
 # -----------------------------------------------------
