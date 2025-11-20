@@ -6,7 +6,7 @@ from pymongo import MongoClient
 import json
 import re
 import torch
-# from sentence_transformers import util
+from sentence_transformers import util
 
 # -----------------------------------------------------
 # GOOGLE GEMINI CONFIG
