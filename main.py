@@ -211,7 +211,7 @@ async def login(body: loginRequest, response: Response):
         raise HTTPException(status_code=401, detail="invalid credentials")
 
     orgId = user.get("organizationId")
-    isSuperAdmin = user.get("role") == "SUPER_ADMIN"
+    isSuperAdmin = user.get("role") in ["SUPER_ADMIN", "SUPER_SPOC"]
     now = int(time.time())
 
     # --- Build token payload ---
@@ -309,7 +309,7 @@ async def registerOrganization(body: OrganizationRegistration, user: dict = Depe
 
     isGlobalSpoc = (role == "SPOC" and subDomain in ["bgv.local", "bgvapp.in", "www.bgvapp.in"])
 
-    if not (role == "SUPER_ADMIN" or isGlobalSpoc):
+    if not (role == "SUPER_ADMIN" or "SUPER_SPOC"):
         raise HTTPException(status_code=403, detail="Only Super Admin or Global SPOC can add organizations")
 
     # Auto-generate subdomain if not provided
@@ -427,7 +427,7 @@ def requirePermission(requiredPermissions):
         userPermissions = user.get("permissions", [])
 
         # SUPER_ADMIN and SPOC always bypass permission check
-        if role in ["SUPER_ADMIN", "SPOC"]:
+        if role in ["SUPER_ADMIN", "SPOC", "SUPER_SPOC"]:
             return user
 
         # ✅ Dynamic permission validation
@@ -473,7 +473,7 @@ async def getDashboard(
     def ensure_org_access(organizationId):
         """Ensure the logged-in user has access to the requested organizationId"""
         # SUPER_ADMIN → full access
-        if role == "SUPER_ADMIN":
+        if role == "SUPER_ADMIN" or "SUPER_SPOC":
             return True
 
         # SUPER_ADMIN_HELPER → must be in accessibleOrganizations
@@ -526,9 +526,9 @@ async def getDashboard(
         ensure_org_access(organizationId)
 
     # ---------------------------------------------------
-    # SUPER ADMIN
+    # SUPER ADMIN or SUPER_SPOC
     # ---------------------------------------------------
-    if role == "SUPER_ADMIN":
+    if role == "SUPER_ADMIN" or "SUPER_SPOC":
         orgFilter = {}
         if organizationId:
             orgFilter = {"organizationId": organizationId}
@@ -549,9 +549,9 @@ async def getDashboard(
             "failedVerifications": failedCount,
             "stageBreakdown": stageStats
         }
-        await logActivity(user, "View Dashboard", "Super Admin viewed dashboard", "Success")
+        await logActivity(user, "View Dashboard", f"{role}  viewed dashboard", "Success")
         return JSONResponse(status_code=200, content=jsonable_encoder({
-            "role": "SUPER_ADMIN",
+            "role": role,
             "stats": stats
         }))
 
@@ -670,7 +670,7 @@ async def updateOrganization(orgId: str, body: dict, user: dict = Depends(requir
     # -------------------------
     # Role-based authorization
     # -------------------------
-    if role not in ["SUPER_ADMIN", "SPOC", "ORG_HR"]:
+    if role not in ["SUPER_ADMIN", "SPOC", "ORG_HR", "SUPER_SPOC"]:
         raise HTTPException(status_code=403, detail="You are not authorized to update organizations")
 
     try:
@@ -764,7 +764,7 @@ async def addHelper(body: dict = Body(...), user: dict = Depends(requireAuth)):
     role = user.get("role")
 
     # 🧩 Step 1: Role validation
-    if role not in ["SUPER_ADMIN", "SUPER_ADMIN_HELPER", "SPOC", "ORG_HR"]:
+    if role not in ["SUPER_ADMIN", "SUPER_ADMIN_HELPER", "SPOC", "ORG_HR", "SUPER_SPOC"]:
         raise HTTPException(status_code=403, detail="You are not authorized to add helpers")
 
     # 🧾 Step 2: Extract helper data
@@ -777,6 +777,10 @@ async def addHelper(body: dict = Body(...), user: dict = Depends(requireAuth)):
     # 🧩 Default permissions by role (auto-assigned if not provided)
     defaultPermissionsMap = {
         "SUPER_ADMIN": [
+            "organization:view", "organization:update", "users:manage",
+            "verification:view", "verification:assign", "candidate:create", "dashboard:view",  "organization:create",
+        ],
+        "SUPER_SPOC": [
             "organization:view", "organization:update", "users:manage",
             "verification:view", "verification:assign", "candidate:create", "dashboard:view",  "organization:create",
         ],
@@ -812,7 +816,7 @@ async def addHelper(body: dict = Body(...), user: dict = Depends(requireAuth)):
     orgId = None
 
     # SUPER_ADMIN → can add to any org
-    if role == "SUPER_ADMIN":
+    if role == "SUPER_ADMIN" or "SUPER_SPOC":
         orgId = targetOrgId or user.get("organizationId")
 
     # SUPER_ADMIN_HELPER → only within accessible orgs (from user doc)
@@ -1037,7 +1041,7 @@ async def getUsers(request: Request, organizationId: Optional[str] = Query(None)
     isGlobalSpoc = False  # computed later for SPOC
 
     # 1️⃣ SUPER ADMIN → unrestricted
-    if role == "SUPER_ADMIN":
+    if role == "SUPER_ADMIN" or "SUPER_SPOC":
         allowedOrgIds = None
 
     # 2️⃣ SPOC → could be global (BGV SPOC) or org-level SPOC
@@ -1149,7 +1153,7 @@ async def updateUser(userId: str, body: dict = Body(...), user: dict = Depends(r
     targetOrgId = targetUser.get("organizationId")
 
         # --- Role-Based Access Control ---
-    if role == "SUPER_ADMIN":
+    if role == "SUPER_ADMIN" or "SUPER_SPOC":
         pass  # full control
 
     elif role == "SUPER_ADMIN_HELPER":
@@ -1183,7 +1187,7 @@ async def updateUser(userId: str, body: dict = Body(...), user: dict = Depends(r
     ]
 
     # Super Admin can also edit role + accessibleOrganizations
-    if role == "SUPER_ADMIN":
+    if role == "SUPER_ADMIN" or "SUPER_SPOC":
         editableFields.extend(["role", "organizationId", "accessibleOrganizations"])
 
     # Super Admin Helper can edit role within allowed orgs, but only assign orgs within his accessible list
@@ -1257,7 +1261,7 @@ async def getOrganizations(
     query = {}
 
     # --- SUPER ADMIN: All orgs or specific org ---
-    if role == "SUPER_ADMIN":
+    if role == "SUPER_ADMIN" or "SUPER_SPOC":
         if organizationId:
             try:
                 query = {"_id": ObjectId(organizationId)}
@@ -1397,7 +1401,7 @@ async def getVerifications(
         query["candidateId"] = candidateId
 
     # 🧩 Role-based Access Control
-    if role == "SUPER_ADMIN":
+    if role == "SUPER_ADMIN" or "SUPER_SPOC":
         pass  # full access
 
     elif role == "SPOC":
@@ -1555,7 +1559,7 @@ async def getCandidates(
     query = {}
 
     # 🔹 SUPER_ADMIN → access all
-    if role == "SUPER_ADMIN":
+    if role == "SUPER_ADMIN" or "SUPER_SPOC":
         if orgId:
             query["organizationId"] = orgId
 
@@ -1672,7 +1676,7 @@ async def modifyCandidate(body: dict = Body(...), user: dict = Depends(requireAu
     allowed = False
 
     # 1. SUPER ADMIN → can edit/delete any candidate
-    if role == "SUPER_ADMIN":
+    if role == "SUPER_ADMIN" or "SUPER_SPOC":
         allowed = True
 
     # 2. BGV SPOC (global spoc)
@@ -1838,7 +1842,7 @@ async def initiateStageVerification(body: dict = Body(...), user: dict = Depends
     accessible = [str(x) for x in user.get("accessibleOrganizations", [])]
 
     # SUPER_ADMIN → all orgs allowed
-    if role == "SUPER_ADMIN":
+    if role == "SUPER_ADMIN" or "SUPER_SPOC":
         pass
 
     # BGV SPOC → all orgs allowed
@@ -2080,7 +2084,7 @@ async def runStage(body: dict = Body(...), user: dict = Depends(requireAuth)):
     allowed = False
 
     # SUPER ADMIN → full access
-    if role == "SUPER_ADMIN":
+    if role == "SUPER_ADMIN" or "SUPER_SPOC":
         allowed = True
 
     # BGV SPOC → full access
@@ -2313,7 +2317,7 @@ async def retryCheck(body: dict = Body(...), user: dict = Depends(requireAuth)):
     accessibleOrgs = [str(x) for x in user.get("accessibleOrganizations", [])]
     role = user.get("role")
 
-    if role == "SUPER_ADMIN":
+    if role == "SUPER_ADMIN" or "SUPER_SPOC":
         pass
     elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
         pass
@@ -2894,7 +2898,7 @@ async def resumePendingVerifications(user: dict = Depends(requireAuth)):
     # ------------------------------
     # 🔒 Role-based Access Control
     # ------------------------------
-    if role not in ["SUPER_ADMIN", "SUPER_ADMIN_HELPER"]:
+    if role not in ["SUPER_ADMIN", "SUPER_ADMIN_HELPER", "SUPER_SPOC"]:
         raise HTTPException(status_code=403, detail="Not authorized to resume verifications")
 
     # ------------------------------
@@ -3000,7 +3004,7 @@ async def initiateSelfVerificationV2(body: dict = Body(...), user: dict = Depend
     # ---- Resolve organization by role ----
     organizationId = None
 
-    if role == "SUPER_ADMIN" or (role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail)):
+    if role == "SUPER_ADMIN" or "SUPER_SPOC":
         organizationId = requestedOrgId or candidateOrgId
 
     elif role == "SUPER_ADMIN_HELPER":
@@ -3325,7 +3329,7 @@ async def adminRunSelfStage(body: dict = Body(...), user: dict = Depends(require
 
     allowed = False
 
-    if role == "SUPER_ADMIN":
+    if role == "SUPER_ADMIN" or "SUPER_SPOC":
         allowed = True
     elif role == "SUPER_ADMIN_HELPER":
         if verOrg in [str(x) for x in user.get("accessibleOrganizations", [])]:
@@ -3440,7 +3444,7 @@ async def addCandidate(body: dict = Body(...), user: dict = Depends(requireAuth)
     # ------------------------
 
     # 1️⃣ SUPER_ADMIN / BGV SPOC → any org
-    if role == "SUPER_ADMIN":
+    if role == "SUPER_ADMIN" or "SUPER_SPOC":
         orgId = inputOrgId or user.get("organizationId")
         if not orgId:
             raise HTTPException(status_code=400, detail="Organization ID required for Super Admin")
@@ -3569,7 +3573,7 @@ async def addCandidate(body: dict = Body(...), user: dict = Depends(requireAuth)
 @app.get("/secure/activityLogs")
 async def getActivityLogs(user: dict = Depends(requireAuth)):
     query = {}
-    if user.get("role") != "SUPER_ADMIN":
+    if user.get("role") not in ["SUPER_ADMIN", "SUPER_SPOC"] :
         query["organizationId"] = user.get("organizationId")
 
     cursor = activityLogsCol.find(query).sort("timestamp", -1)
@@ -3724,7 +3728,6 @@ async def resetPassword(
 
 
 
-
 @app.post("/secure/uploadLogo")
 async def uploadLogo(
     file: UploadFile = File(...),
@@ -3814,7 +3817,7 @@ async def verify_certificate_access(user: dict, meta: dict):
     createdByEmail = meta["createdBy"]
 
     # SUPER ADMIN — access all
-    if role == "SUPER_ADMIN":
+    if role == "SUPER_ADMIN" or "SUPER_SPOC":
         return True
 
     # SUPER ADMIN HELPER — only assigned orgs
