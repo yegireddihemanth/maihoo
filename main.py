@@ -3596,6 +3596,87 @@ async def getActivityLogs(user: dict = Depends(requireAuth)):
             "logs": logs
         })
     )
+# get specific logs
+@app.get("/secure/recentImportantActivity")
+async def getRecentImportantActivity(
+    noOfLogs: int = 50,   # frontend can request any number
+    user: dict = Depends(requireAuth)
+):
+
+    # -----------------------------------------
+    # IMPORTANT LOG TYPES
+    # -----------------------------------------
+    IMPORTANT_LOG_TYPES = [
+        # OLD BASE TYPES
+        "Add Candidate",
+        "New Verification Initiated",
+        "Add User",
+        "Add Organization",
+        "Update Verification Status",
+        "Unauthorized Attempt",
+        "Error",
+        "Login",
+        "Logout",
+
+        # NEW TYPES FROM YOU
+        "Password Reset Failed",
+        "Update Organization Failed",
+        "Updated Organization",
+        "Add Helper Failed",
+        "Added Helper User",
+        "Updated User",
+        "Delete Candidate",
+        "Edit Candidate",
+        "Run Stage Failed",
+        "Retry Check",
+        "Upload Logo Failed",
+        "Register Organization Failed",
+        "Created Organization"
+    ]
+
+    # -----------------------------------------
+    # ROLE RESTRICTION
+    # -----------------------------------------
+    query = {
+        "action": {"$in": IMPORTANT_LOG_TYPES}
+    }
+
+    if user.get("role") not in ["SUPER_ADMIN", "SUPER_SPOC"]:
+        query["organizationId"] = user.get("organizationId")
+
+    # -----------------------------------------
+    # FETCH LOGS LIMIT = noOfLogs
+    # -----------------------------------------
+    cursor = (
+        activityLogsCol
+        .find(query)
+        .sort("timestamp", -1)
+        .limit(noOfLogs)
+    )
+    
+    logs = await cursor.to_list(noOfLogs)
+
+    # Convert ObjectIDs → string
+    for log in logs:
+        if "_id" in log:
+            log["_id"] = str(log["_id"])
+        if "userId" in log and isinstance(log["userId"], ObjectId):
+            log["userId"] = str(log["userId"])
+        if "organizationId" in log and isinstance(log["organizationId"], ObjectId):
+            log["organizationId"] = str(log["organizationId"])
+
+    # -----------------------------------------
+    # RETURN RESPONSE
+    # -----------------------------------------
+    return JSONResponse(
+        status_code=200,
+        content=jsonable_encoder({
+            "requestedLogs": noOfLogs,
+            "returnedLogs": len(logs),
+            "includedLogTypes": IMPORTANT_LOG_TYPES,
+            "logs": logs
+        })
+    )
 
 
 from fastapi import APIRouter, Body, HTTPException
