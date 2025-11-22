@@ -180,21 +180,20 @@
 #     except Exception as e:
 #         print(f"❌ Error in verification process: {e}")
 import asyncio
+import aiohttp
 from datetime import datetime, timezone
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
-import aiohttp
-import ssl
-import certifi
 
-# ---------------------------------------
-# SSL – FIXED FOR FASTAPI + AIOHTTP
-# ---------------------------------------
-ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+# ---------------------------------------------------
+# 📌 Surepass Dummy Credentials (REPLACE THEM)
+# ---------------------------------------------------
+SUREPASS_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJmcmVzaCI6ZmFsc2UsImlhdCI6MTc2MzgwMDM0NywianRpIjoiNjA5ZTZmOTctNTcxOS00MjA2LWEwZDAtMjc5ZmFiZTQ0ODQ1IiwidHlwZSI6ImFjY2VzcyIsImlkZW50aXR5IjoiZGV2LnRocmVzaGluZ0BzdXJlcGFzcy5pbyIsIm5iZiI6MTc2MzgwMDM0NywiZXhwIjoyMzk0NTIwMzQ3LCJlbWFpbCI6InRocmVzaGluZ0BzdXJlcGFzcy5pbyIsInRlbmFudF9pZCI6Im1haW4iLCJ1c2VyX2NsYWltcyI6eyJzY29wZXMiOlsidXNlciJdfX0.h90UBZtuKinYF4kjsJ8sGjDR0rtAXNDsDpJwS3bQAEw"
+SUREPASS_CUSTOMER_ID = ""
 
-# -------------------------------
-# MongoDB Connection
-# -------------------------------
+# ---------------------------------------------------
+# 📌 MongoDB
+# ---------------------------------------------------
 mongoUri = "mongodb+srv://maihoo:akonpopStar%40143@maihoo.ztaytqd.mongodb.net/?appName=maihoo"
 mongoDbName = "bgv_core"
 
@@ -204,167 +203,205 @@ db = client[mongoDbName]
 verificationsCol = db["verifications"]
 candidatesCol = db["candidates"]
 
-# -------------------------------
-# Surepass Config
-# -------------------------------
-from config import SUREPASS_TOKEN, SUREPASS_BASE_URL
-
-
-# ==========================================================
-# 🔥 FIXED: Surepass API Caller (Works inside FastAPI)
-# ==========================================================
-async def call_surepass_api(endpoint: str, payload: dict):
-    url = f"{SUREPASS_BASE_URL}/{endpoint}"
-
-    headers = {
-        "Authorization": f"Bearer {SUREPASS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-
-    async with aiohttp.ClientSession() as session:
-        try:
-            # 🔥 Critical Fix: disable SSL validation inside Uvicorn
-            async with session.post(url, json=payload, headers=headers, ssl=False) as resp:
-                try:
-                    data = await resp.json()
-                except:
-                    data = {"error": "Invalid JSON response"}
-
-                return {
-                    "status_code": resp.status,
-                    "data": data
-                }
-
-        except Exception as e:
-            return {
-                "status_code": 500,
-                "error": str(e)
-            }
-
-
-# ==========================================================
-# REAL Surepass Checks
-# ==========================================================
-async def check_aadhaar_pan_link(aadhaar_number: str):
-    payload = {
-        "aadhaar_number": aadhaar_number
-    }
-    return await call_surepass_api("pan/aadhaar-pan-link-check", payload)
-
-
-async def check_pan_name(pan_number: str, full_name: str = None):
-    payload = {
-        "id_number": pan_number
-    }
-
-    headers = {
-        "Authorization": f"Bearer {SUREPASS_TOKEN}",
-        "X-Customer-Id": SUREPASS_TOKEN,
-        "Content-Type": "application/json"
-    }
-
-    url = f"{SUREPASS_BASE_URL}/pan/pan"
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, headers=headers, ssl=ssl_ctx) as resp:
-            try:
+# ---------------------------------------------------
+# 📌 HTTP utility
+# ---------------------------------------------------
+async def post_json(url: str, headers: dict, payload: dict):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, timeout=60) as resp:
                 data = await resp.json()
-            except:
-                data = {"error": "Invalid JSON response"}
+                success = resp.status == 200 and data.get("success", False)
+                status = "COMPLETED" if success else "FAILED"
+                remarks = data if not success else data.get("data", data)
 
-            return {
-                "status_code": resp.status,
-                "data": data
-            }
+                return status, remarks
+
+    except Exception as e:
+        return "FAILED", f"API Error: {e}"
+
+# ---------------------------------------------------
+# 📌 Verification Functions (REAL CALLS)
+# ---------------------------------------------------
+
+# 1. PAN–Aadhaar Seeding
+async def verify_pan_aadhaar_seeding(aadhaar_number: str):
+    url = "https://kyc-api.surepass.io/api/v1/pan/aadhaar-pan-link-check"
+    headers = {
+        "Authorization": f"Bearer {SUREPASS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {"aadhaar_number": aadhaar_number}
+    return await post_json(url, headers, payload)
+
+
+# 2. PAN Verification
+async def verify_pan(pan_number: str):
+    url = "https://kyc-api.surepass.io/api/v1/pan/pan"
+    headers = {
+        "Authorization": f"Bearer {SUREPASS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {"id_number": pan_number}
+    return await post_json(url, headers, payload)
 
 
 
+# 3. Employment History (UAN)
+async def verify_employment_history(uan_number: str):
+    url = "https://kyc-api.surepass.io/api/v1/income/employment-history-uan-v2"
 
-# ==========================================================
-# Dispatcher – ONLY Real Checks Allowed
-# ==========================================================
+    headers = {
+        "Authorization": f"Bearer {SUREPASS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {"id_number": uan_number}
+    return await post_json(url, headers, payload)
+
+
+# 4. Aadhaar → UAN
+async def verify_aadhaar_to_uan(aadhaar_number: str):
+    url = "https://kyc-api.surepass.io/api/v1/income/epfo/aadhaar-to-uan"
+    headers = {
+        "Authorization": f"Bearer {SUREPASS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {"aadhaar_number": aadhaar_number}
+    return await post_json(url, headers, payload)
+
+
+# 5. CIBIL Credit Report
+async def verify_credit_report(candidate: dict):
+    url = "https://kyc-api.surepass.io/api/v1/credit-report-cibil/fetch-report"
+    headers = {
+        "Authorization": f"Bearer {SUREPASS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "mobile": candidate.get("phone"),
+        "pan": candidate.get("panNumber"),
+        "name": f"{candidate.get('firstName')} {candidate.get('lastName')}",
+        "gender": "male",   # you can update this from DB if available
+        "consent": "Y"
+    }
+    return await post_json(url, headers, payload)
+
+
+# 6. Court Record Check
+async def verify_court_record(candidate: dict):
+    url = "https://kyc-api.surepass.io/api/v1/ecourts/ecourt-search-v2"
+    headers = {
+        "Authorization": f"Bearer {SUREPASS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "name": f"{candidate.get('firstName')} {candidate.get('lastName')}",
+        "father_name": "",  # You can extend candidate schema to store father name
+        "address": candidate.get("address", ""),
+        "year": "",
+        "state": ""
+    }
+    return await post_json(url, headers, payload)
+
+# ---------------------------------------------------
+# 📌 Dispatcher (Router)
+# ---------------------------------------------------
+def validate_fields(check_type, candidate):
+    required = {
+        "pan_aadhaar_seeding": ["aadhaarNumber"],
+        "pan_verification": ["panNumber"],
+        "employment_history": ["uanNumber"],
+        "aadhaar_to_uan": ["aadhaarNumber"],
+        "credit_report": ["phone", "panNumber", "firstName", "lastName"],
+        "court_record": ["firstName", "lastName", "address"]
+    }
+
+    fields = required.get(check_type, [])
+    for field in fields:
+        if not candidate.get(field):
+            return False, field
+    return True, None
+
+
 async def run_verification(check_type: str, candidate: dict):
-    check_type = check_type.lower().replace(" ", "_")
+    check_type = check_type.lower().strip()
 
-    # Aadhaar–PAN link check
-    if check_type in ["aadhaar_pan_link", "aadhaar_pan_check"]:
-        resp = await check_aadhaar_pan_link(candidate.get("aadhaarNumber"))
-        status = "COMPLETED" if resp["status_code"] == 200 else "FAILED"
-        return status, str(resp)
+    # 🟡 Step 1: required-field validation
+    ok, missing_field = validate_fields(check_type, candidate)
+    if not ok:
+        return "SKIPPED", f"Missing required field: {missing_field}"
 
-    # PAN name match
-    if check_type in ["pan_name_check", "pan_name_match"]:
-        resp = await check_pan_name(candidate.get("panNumber"), candidate.get("firstName"))
-        status = "COMPLETED" if resp["status_code"] == 200 else "FAILED"
-        return status, str(resp)
+    # 🟢 Step 2: actual API calls
+    if check_type == "pan_aadhaar_seeding":
+        return await verify_pan_aadhaar_seeding(candidate.get("aadhaarNumber"))
 
-    # ❌ Everything else is NOT implemented
-    return "FAILED", f"Verification type '{check_type}' not implemented"
+    if check_type == "pan_verification":
+        return await verify_pan(candidate.get("panNumber"))
 
+    if check_type == "employment_history":
+        return await verify_employment_history(candidate.get("uanNumber"))
 
-# ==========================================================
-# Orchestrator (background processor)
-# ==========================================================
+    if check_type == "aadhaar_to_uan":
+        return await verify_aadhaar_to_uan(candidate.get("aadhaarNumber"))
+
+    if check_type == "credit_report":
+        return await verify_credit_report(candidate)
+
+    if check_type == "court_record":
+        return await verify_court_record(candidate)
+
+    # fallback
+    return "FAILED", f"Unknown check type: {check_type}"
+
+# ---------------------------------------------------
+# 📌 Orchestrator — Full BGV Flow
+# ---------------------------------------------------
 async def process_verification_record(verification):
-    """
-    Runs stage-by-stage verification.
-    Uses only the REAL dispatcher above.
-    """
-
     try:
         candidate = await candidatesCol.find_one({"_id": ObjectId(verification["candidateId"])})
-
         if not candidate:
-            print(f"⚠ Candidate missing for verification {verification['_id']}")
+            print(f"⚠ Candidate not found: {verification['_id']}")
             return
 
         print(f"\n🚀 Starting verification for {candidate.get('firstName')}")
 
-        # Loop through stages
         for stage_name, checks in verification["stages"].items():
 
-            # Mark stage active
             await verificationsCol.update_one(
                 {"_id": verification["_id"]},
                 {"$set": {"currentStage": stage_name}}
             )
 
-            # Run each check
+            print(f"➡ Stage: {stage_name}")
+
             for check in checks:
                 check_name = check["check"]
 
-                # Mark check IN_PROGRESS
                 await verificationsCol.update_one(
                     {"_id": verification["_id"], f"stages.{stage_name}.check": check_name},
                     {"$set": {f"stages.{stage_name}.$.status": "IN_PROGRESS"}}
                 )
 
-                # Run real Surepass API
                 status, remarks = await run_verification(check_name, candidate)
 
-                # Update DB
                 await verificationsCol.update_one(
                     {"_id": verification["_id"], f"stages.{stage_name}.check": check_name},
-                    {
-                        "$set": {
-                            f"stages.{stage_name}.$.status": status,
-                            f"stages.{stage_name}.$.remarks": remarks,
-                            f"stages.{stage_name}.$.submittedAt": datetime.now(timezone.utc).isoformat()
-                        }
-                    }
+                    {"$set": {
+                        f"stages.{stage_name}.$.status": status,
+                        f"stages.{stage_name}.$.remarks": remarks
+                    }}
                 )
 
-            await asyncio.sleep(0.05)
+                print(f"   ✔ {check_name} → {status}")
 
-        # Mark verification complete
+            await asyncio.sleep(1)
+
         await verificationsCol.update_one(
             {"_id": verification["_id"]},
-            {
-                "$set": {
-                    "overallStatus": "COMPLETED",
-                    "completedAt": datetime.now(timezone.utc).isoformat()
-                }
-            }
+            {"$set": {
+                "overallStatus": "COMPLETED",
+                "completedAt": datetime.now(timezone.utc).isoformat()
+            }}
         )
 
         await candidatesCol.update_one(
@@ -372,7 +409,8 @@ async def process_verification_record(verification):
             {"$set": {"status": "VERIFIED"}}
         )
 
-        print(f"🏁 Verification completed for {candidate.get('firstName')}")
+        print(f"🏁 Completed verification for {candidate.get('firstName')}")
 
     except Exception as e:
-        print(f"❌ Error in verification: {e}")
+        print(f"❌ Orchestrator Error: {e}")
+
