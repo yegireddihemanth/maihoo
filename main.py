@@ -309,7 +309,7 @@ async def registerOrganization(body: OrganizationRegistration, user: dict = Depe
 
     isGlobalSpoc = (role == "SPOC" and subDomain in ["bgv.local", "bgvapp.in", "www.bgvapp.in"])
 
-    if not (role in ["SUPER_ADMIN"  "SUPER_SPOC"]):
+    if not (role in ["SUPER_ADMIN",  "SUPER_SPOC"]):
         raise HTTPException(status_code=403, detail="Only Super Admin or Global SPOC can add organizations")
 
     # Auto-generate subdomain if not provided
