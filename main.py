@@ -202,11 +202,19 @@ async def custom_swagger():
 @app.post("/auth/login")
 async def login(body: loginRequest, response: Response):
     # --- Authenticate user ---
+    normalizedEmail = body.email.lower().strip()
+
     user = await usersCol.find_one({
-        "email": body.email,
+        "email": {
+            "$regex": f"^{normalizedEmail}$",
+            "$options": "i"   # case insensitive
+        },
         "password": body.password,
         "isActive": True
     })
+
+
+
     if not user:
         raise HTTPException(status_code=401, detail="invalid credentials")
 
@@ -1590,7 +1598,11 @@ async def getCandidates(
 
     # 🔹 HELPER → only candidates they created
     elif role == "HELPER":
-        query["createdBy"] = userEmail
+        query["createdBy"] = {
+        "$regex": f"^{userEmail}$",
+        "$options": "i"
+}
+
 
     # 🔹 Everyone else → forbidden
     else:
@@ -2511,75 +2523,69 @@ async def initiateStage(
     organizationId = body.get("organizationId")
     checks = body.get("checks", [])
 
+    # ---------------------------------------------------------
+    # 🟩 FIX: Local buildChecks JUST for Self verification
+    # ---------------------------------------------------------
+    def buildChecks(chkList):
+        return [{
+            "check": c,
+            "status": "NOT_STARTED",
+            "remarks": None,
+            "attachments": [],
+            "submittedAt": None,
+            "metadata": None
+        } for c in chkList]
+
     # ---------------------------------------------
-    # RULE: No duplicate checks inside same stage
+    # RULES
     # ---------------------------------------------
     if len(checks) != len(set(checks)):
-        raise HTTPException(
-            status_code=400,
-            detail="Duplicate checks found inside the same stage"
-        )
+        raise HTTPException(400, "Duplicate checks found")
 
     if not stage or stage not in ["primary", "secondary", "final"]:
-        raise HTTPException(status_code=400, detail="Invalid stage")
+        raise HTTPException(400, "Invalid stage")
 
     if not candidateId or not organizationId:
-        raise HTTPException(status_code=400, detail="Missing IDs")
+        raise HTTPException(400, "Missing IDs")
 
-    if not isinstance(checks, list) or len(checks) == 0:
-        raise HTTPException(status_code=400, detail="Checks array required")
-
-    # Validate candidate
     try:
         candObjId = ObjectId(candidateId)
     except:
-        raise HTTPException(status_code=400, detail="Invalid candidateId")
+        raise HTTPException(400, "Invalid candidateId")
 
     candidate = await candidatesCol.find_one({"_id": candObjId})
     if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
+        raise HTTPException(404, "Candidate not found")
 
-    # Validate organization
     org = await orgsCol.find_one({"_id": ObjectId(organizationId)})
     if not org:
-        raise HTTPException(status_code=404, detail="Organization not found")
+        raise HTTPException(404, "Organization not found")
 
     organizationName = org.get("organizationName")
 
-    # Existing verification document?
     ver = await verificationsCol.find_one({
         "candidateId": candidateId,
         "organizationId": organizationId
     })
 
     # ----------------------------------------------------------
-    # --- FIX 1: BLOCK starting again if verification exists  ---
+    # BLOCK duplicate or conflicting initialization
     # ----------------------------------------------------------
     if ver:
-        if ver.get("overallStatus") == "COMPLETED":
-            raise HTTPException(400, "Verification already completed for this candidate")
+        if ver.get("overallStatus") in ["COMPLETED", "FAILED"]:
+            raise HTTPException(400, "Verification already closed for this candidate")
 
-        if ver.get("overallStatus") == "FAILED":
-            raise HTTPException(400, "Verification already failed earlier")
+        if len(ver["stages"].get(stage, [])) > 0:
+            raise HTTPException(400, f"Stage '{stage}' already initialized")
 
-        # BLOCK if stage already exists
-        existingStageChecks = ver["stages"].get(stage, [])
-        if existingStageChecks and len(existingStageChecks) > 0:
-            raise HTTPException(400, detail=f"Stage '{stage}' is already initialized")
-
-        # BLOCK if ANY stage still in progress
         activeStage = ver.get("currentStage")
         if activeStage:
-            activeChecks = ver["stages"].get(activeStage, [])
-            incomplete = any(c["status"] != "COMPLETED" for c in activeChecks)
+            incomplete = any(c["status"] != "COMPLETED" for c in ver["stages"][activeStage])
             if incomplete:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Cannot start '{stage}' because '{activeStage}' stage is still in progress"
-                )
+                raise HTTPException(400, f"Cannot start {stage}, {activeStage} not completed")
 
-    # If no verification doc → create a new one
-    if not ver:
+    else:
+        # Create new verification doc
         verDoc = {
             "candidateId": candidateId,
             "candidateName": f"{candidate.get('firstName','')} {candidate.get('lastName','')}".strip(),
@@ -2608,52 +2614,26 @@ async def initiateStage(
 
     verId = ver["_id"]
 
-    # Validate stage sequence
-    if stage == "secondary":
-        primary = ver["stages"].get("primary", [])
-        if not primary or not all(c["status"] == "COMPLETED" for c in primary):
-            raise HTTPException(400, "Primary must be completed before secondary")
+    # ----------------------------
+    # PREVENT DUPLICATE ACROSS STAGES
+    # ----------------------------
+    used = set()
+    for stageName, stageList in ver["stages"].items():
+        for c in stageList:
+            used.add(c["check"])
 
-    if stage == "final":
-        primary = ver["stages"].get("primary", [])
-        secondary = ver["stages"].get("secondary", [])
-        if not primary or not all(c["status"] == "COMPLETED" for c in primary):
-            raise HTTPException(400, "Primary incomplete")
-        if not secondary or not all(c["status"] == "COMPLETED" for c in secondary):
-            raise HTTPException(400, "Secondary incomplete")
+    for c in checks:
+        if c in used:
+            raise HTTPException(400, f"Check '{c}' already used in previous stage")
 
-    # ----------------------------------------------------------
-    # --- FIX 2: PREVENT DUPLICATE CHECKS ACROSS STAGES      ---
-    # ----------------------------------------------------------
-    existingStages = ver["stages"]
-    usedChecks = set()
-
-    for stgName, stgList in existingStages.items():
-        if isinstance(stgList, list):  # skip primaryStatus, finalStatus keys
-            for c in stgList:
-                usedChecks.add(c["check"])
-
-    for chk in checks:
-        if chk in usedChecks:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Check '{chk}' already used in a previous stage"
-            )
-
-    # Build new checklist
+    # ----------------------------
+    # BUILD CHECKS (ONLY PASSED)
+    # ----------------------------
     newChecks = buildChecks(checks)
 
-    # Generate token
     token = str(uuid.uuid4())
     expiresAt = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
 
-    # ----------------------------------------------------------
-    # --- FIX 3: Do NOT override stages that already exist   ---
-    # ----------------------------------------------------------
-    if ver["stages"][stage] != []:
-        raise HTTPException(400, f"Stage '{stage}' already has checks and cannot be replaced")
-
-    # Update verification doc
     await verificationsCol.update_one(
         {"_id": verId},
         {
@@ -2661,17 +2641,17 @@ async def initiateStage(
                 f"stages.{stage}": newChecks,
                 "currentStage": stage,
                 "overallStatus": "IN_PROGRESS",
-                "failureStage": None,
                 "selfLinkExpiresAt": expiresAt,
-                f"{stage}Token": token
+                f"{stage}Token": token,
+                "failureStage": None
             }
         }
     )
 
     # Send email
     candidateEmail = candidate.get("email")
-    if not candidateEmail or "@" not in candidateEmail:
-        raise HTTPException(400, detail="Invalid candidate email")
+    if not candidateEmail:
+        raise HTTPException(400, "Invalid candidate email")
 
     send_self_verification_email(
         to_email=candidateEmail,
@@ -2735,9 +2715,6 @@ async def submitCheck(
     check: str = Form(...),
     metadata: str = Form(None)
 ):
-    """
-    Candidate submits a check.
-    """
 
     try:
         verObjId = ObjectId(verificationId)
@@ -2755,46 +2732,41 @@ async def submitCheck(
     if idx is None:
         raise HTTPException(status_code=400, detail="Check not found")
 
-    # Sequential ordering check
     for i in range(idx):
         if stageList[i]["status"] != "COMPLETED":
             raise HTTPException(status_code=400, detail="Previous checks not completed")
 
-    # Run check
+    # Run the actual check
     candidate = await candidatesCol.find_one({"_id": ObjectId(ver["candidateId"])})
+
     try:
         status, remarks = await run_verification(check, candidate)
     except:
         status, remarks = ("FAILED", "Runtime error")
 
-    # 🟦 NEW: SKIPPED behaves like FAILED
     if status == "SKIPPED":
         status = "FAILED"
         remarks = f"Missing required data: {remarks}"
 
-    # Store update
+    # Update check result
     await verificationsCol.update_one(
         {"_id": verObjId},
-        {
-            "$set": {
-                f"stages.{stage}.{idx}.status": status,
-                f"stages.{stage}.{idx}.remarks": remarks,
-                f"stages.{stage}.{idx}.submittedAt": get_current_time(),
-                f"stages.{stage}.{idx}.metadata": metadata
-            }
-        }
+        {"$set": {
+            f"stages.{stage}.{idx}.status": status,
+            f"stages.{stage}.{idx}.remarks": remarks,
+            f"stages.{stage}.{idx}.submittedAt": get_current_time(),
+            f"stages.{stage}.{idx}.metadata": metadata
+        }}
     )
 
-    # ❌ FAILED path
+    # FAILURE path
     if status == "FAILED":
         await verificationsCol.update_one(
             {"_id": verObjId},
-            {
-                "$set": {
-                    "overallStatus": "FAILED",
-                    "failureStage": f"{stage}_{check}"   # 🟦 NEW
-                }
-            }
+            {"$set": {
+                "overallStatus": "FAILED",
+                "failureStage": f"{stage}_{check}"
+            }}
         )
         return {"status": "FAILED", "remarks": remarks}
 
@@ -2802,27 +2774,34 @@ async def submitCheck(
     ver = await verificationsCol.find_one({"_id": verObjId})
     stageList = ver["stages"][stage]
 
-    # If entire stage completed
+    # --------------------------------------
+    #    🟩 COMPLETE FIX FOR STAGE STATUS
+    # --------------------------------------
     if all(c["status"] == "COMPLETED" for c in stageList):
 
-        # Mark stage completed
+        # ❗ FIX: Write stageStatus OUTSIDE the "stages" dict
         await verificationsCol.update_one(
             {"_id": verObjId},
-            {"$set": {f"stages.{stage}Status": "COMPLETED"}}
+            {"$set": {f"{stage}Status": "COMPLETED"}}
         )
 
-        # 🟩 FINAL STAGE COMPLETED
+        # ❗ FIX: REMOVE WRONG FIELD IF IT EXISTS
+        await verificationsCol.update_one(
+            {"_id": verObjId},
+            {"$unset": {f"stages.{stage}Status": ""}}
+        )
+
+        # FINAL stage fully complete
         if stage == "final":
             await verificationsCol.update_one(
                 {"_id": verObjId},
-                {
-                    "$set": {
-                        "overallStatus": "COMPLETED",
-                        "currentStage": "final",
-                        "failureStage": None      # 🟦 NEW
-                    }
-                }
+                {"$set": {
+                    "overallStatus": "COMPLETED",
+                    "currentStage": "final",
+                    "failureStage": None
+                }}
             )
+
             await candidatesCol.update_one(
                 {"_id": ObjectId(ver["candidateId"])},
                 {"$set": {"status": "VERIFIED"}}
@@ -3053,422 +3032,422 @@ from datetime import datetime, timedelta, timezone
 # ------------------------------------------------------------
 # 1) ADMIN INITIATES SELF VERIFICATION
 # ------------------------------------------------------------
-@app.post("/secure/self/initiate")
-async def initiateSelfVerificationV2(body: dict = Body(...), user: dict = Depends(requireAuth)):
-    """
-    Admin initiates self verification (PRIMARY → SECONDARY → FINAL).
-    Sends an email containing candidateId, orgId, email, Aadhaar last4.
-    """
+# @app.post("/secure/self/initiate")
+# async def initiateSelfVerificationV2(body: dict = Body(...), user: dict = Depends(requireAuth)):
+#     """
+#     Admin initiates self verification (PRIMARY → SECONDARY → FINAL).
+#     Sends an email containing candidateId, orgId, email, Aadhaar last4.
+#     """
 
-    role = user.get("role")
-    userEmail = user.get("email", "").lower().strip()
+#     role = user.get("role")
+#     userEmail = user.get("email", "").lower().strip()
 
-    candidateId = body.get("candidateId")
-    requestedOrgId = body.get("organizationId")
-    stages = body.get("stages", {})
+#     candidateId = body.get("candidateId")
+#     requestedOrgId = body.get("organizationId")
+#     stages = body.get("stages", {})
 
-    if not candidateId or not stages:
-        raise HTTPException(status_code=400, detail="candidateId and stages required")
+#     if not candidateId or not stages:
+#         raise HTTPException(status_code=400, detail="candidateId and stages required")
 
-    # ---- Validate candidate ----
-    try:
-        cid = ObjectId(candidateId)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid candidateId")
+#     # ---- Validate candidate ----
+#     try:
+#         cid = ObjectId(candidateId)
+#     except:
+#         raise HTTPException(status_code=400, detail="Invalid candidateId")
 
-    candidate = await candidatesCol.find_one({"_id": cid})
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
+#     candidate = await candidatesCol.find_one({"_id": cid})
+#     if not candidate:
+#         raise HTTPException(status_code=404, detail="Candidate not found")
 
-    candidateOrgId = str(candidate.get("organizationId"))
+#     candidateOrgId = str(candidate.get("organizationId"))
 
-    # ---- Resolve organization by role ----
-    organizationId = None
+#     # ---- Resolve organization by role ----
+#     organizationId = None
 
-    if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
-        organizationId = requestedOrgId or candidateOrgId
+#     if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+#         organizationId = requestedOrgId or candidateOrgId
 
-    elif role == "SUPER_ADMIN_HELPER":
-        accessible = [str(x) for x in user.get("accessibleOrganizations", [])]
-        sel = requestedOrgId or candidateOrgId
-        if sel not in accessible:
-            raise HTTPException(status_code=403, detail="Not allowed for this organization")
-        organizationId = sel
+#     elif role == "SUPER_ADMIN_HELPER":
+#         accessible = [str(x) for x in user.get("accessibleOrganizations", [])]
+#         sel = requestedOrgId or candidateOrgId
+#         if sel not in accessible:
+#             raise HTTPException(status_code=403, detail="Not allowed for this organization")
+#         organizationId = sel
 
-    elif role in ["ORG_HR", "SPOC"]:
-        if candidateOrgId != str(user.get("organizationId")):
-            raise HTTPException(status_code=403, detail="Candidate not in your org")
-        organizationId = candidateOrgId
+#     elif role in ["ORG_HR", "SPOC"]:
+#         if candidateOrgId != str(user.get("organizationId")):
+#             raise HTTPException(status_code=403, detail="Candidate not in your org")
+#         organizationId = candidateOrgId
 
-    elif role == "HELPER":
-        if candidate.get("createdBy", "").lower().strip() != userEmail:
-            raise HTTPException(status_code=403, detail="Not your candidate")
-        organizationId = candidateOrgId
+#     elif role == "HELPER":
+#         if candidate.get("createdBy", "").lower().strip() != userEmail:
+#             raise HTTPException(status_code=403, detail="Not your candidate")
+#         organizationId = candidateOrgId
 
-    else:
-        raise HTTPException(status_code=403, detail="Not authorized")
+#     else:
+#         raise HTTPException(status_code=403, detail="Not authorized")
 
-    org = await orgsCol.find_one({"_id": ObjectId(organizationId)})
-    if not org:
-        raise HTTPException(status_code=404, detail="Organization not found")
+#     org = await orgsCol.find_one({"_id": ObjectId(organizationId)})
+#     if not org:
+#         raise HTTPException(status_code=404, detail="Organization not found")
 
-    organizationName = org.get("organizationName")
+#     organizationName = org.get("organizationName")
 
-    # ---- Prevent duplicate active self verification ----
-    existing = await verificationsCol.find_one({
-        "candidateId": candidateId,
-        "organizationId": organizationId,
-        "mode": "SELF",
-        "overallStatus": {"$in": ["PENDING", "IN_PROGRESS"]}
-    })
-    if existing:
-        raise HTTPException(status_code=409, detail="Self verification already started for this candidate")
+#     # ---- Prevent duplicate active self verification ----
+#     existing = await verificationsCol.find_one({
+#         "candidateId": candidateId,
+#         "organizationId": organizationId,
+#         "mode": "SELF",
+#         "overallStatus": {"$in": ["PENDING", "IN_PROGRESS"]}
+#     })
+#     if existing:
+#         raise HTTPException(status_code=409, detail="Self verification already started for this candidate")
 
-    # ---- Build stage structure ----
-    def buildChecks(stageList):
-        return [{
-            "check": c,
-            "status": "NOT_STARTED",
-            "remarks": None,
-            "attachments": [],
-            "submittedAt": None
-        } for c in stageList]
+#     # ---- Build stage structure ----
+#     def buildChecks(stageList):
+#         return [{
+#             "check": c,
+#             "status": "NOT_STARTED",
+#             "remarks": None,
+#             "attachments": [],
+#             "submittedAt": None
+#         } for c in stageList]
 
-    primary = buildChecks(stages.get("primary", []))
-    secondary = buildChecks(stages.get("secondary", []))
-    final = buildChecks(stages.get("final", []))
+#     primary = buildChecks(stages.get("primary", []))
+#     secondary = buildChecks(stages.get("secondary", []))
+#     final = buildChecks(stages.get("final", []))
 
-    now = datetime.now(timezone.utc).isoformat()
-    expiresAt = datetime.now(timezone.utc) + timedelta(hours=24)
+#     now = datetime.now(timezone.utc).isoformat()
+#     expiresAt = datetime.now(timezone.utc) + timedelta(hours=24)
 
-    verificationDoc = {
-        "candidateId": candidateId,
-        "candidateName": f"{candidate.get('firstName','')} {candidate.get('lastName','')}".strip(),
-        "organizationId": organizationId,
-        "organizationName": organizationName,
-        "initiatedBy": userEmail,
-        "initiatedAt": now,
-        "mode": "SELF",
-        "stages": {
-            "primary": primary,
-            "secondary": secondary,
-            "final": final
-        },
-        "currentStage": "primary",
-        "overallStatus": "PENDING",
-        "assignedTo": None,
-        "remarks": [],
-        "selfInfo": {
-            "enabled": True,
-            "expiresAt": expiresAt.isoformat(),
-            "initiatedBy": userEmail,
-            "startedAt": None,
-            "lastActivity": None,
-            "adminOverrideAllowed": True,
-            "candidateCanVerify": True
-        }
-    }
+#     verificationDoc = {
+#         "candidateId": candidateId,
+#         "candidateName": f"{candidate.get('firstName','')} {candidate.get('lastName','')}".strip(),
+#         "organizationId": organizationId,
+#         "organizationName": organizationName,
+#         "initiatedBy": userEmail,
+#         "initiatedAt": now,
+#         "mode": "SELF",
+#         "stages": {
+#             "primary": primary,
+#             "secondary": secondary,
+#             "final": final
+#         },
+#         "currentStage": "primary",
+#         "overallStatus": "PENDING",
+#         "assignedTo": None,
+#         "remarks": [],
+#         "selfInfo": {
+#             "enabled": True,
+#             "expiresAt": expiresAt.isoformat(),
+#             "initiatedBy": userEmail,
+#             "startedAt": None,
+#             "lastActivity": None,
+#             "adminOverrideAllowed": True,
+#             "candidateCanVerify": True
+#         }
+#     }
 
-    res = await verificationsCol.insert_one(verificationDoc)
+#     res = await verificationsCol.insert_one(verificationDoc)
 
-    # ---- Send email ----
-    try:
-        email = candidate.get("email")
-        if not email:
-            raise Exception("Invalid candidate email")
+#     # ---- Send email ----
+#     try:
+#         email = candidate.get("email")
+#         if not email:
+#             raise Exception("Invalid candidate email")
 
-        aadhaar = candidate.get("aadhaarNumber", "XXXX")
-        last4 = aadhaar[-4:]
+#         aadhaar = candidate.get("aadhaarNumber", "XXXX")
+#         last4 = aadhaar[-4:]
 
-        send_self_verification_email(
-            to_email=email,
-            candidateName=verificationDoc["candidateName"],
-            organizationName=organizationName,
-            candidateId=candidateId,
-            organizationId=organizationId,
-            aadhaarLast4=last4
-        )
+#         send_self_verification_email(
+#             to_email=email,
+#             candidateName=verificationDoc["candidateName"],
+#             organizationName=organizationName,
+#             candidateId=candidateId,
+#             organizationId=organizationId,
+#             aadhaarLast4=last4
+#         )
 
-    except Exception as e:
-        await verificationsCol.delete_one({"_id": res.inserted_id})
-        raise HTTPException(status_code=500, detail=f"Email send failed: {str(e)}")
+#     except Exception as e:
+#         await verificationsCol.delete_one({"_id": res.inserted_id})
+#         raise HTTPException(status_code=500, detail=f"Email send failed: {str(e)}")
 
-    return {"message": "Self verification initiated", "verificationId": str(res.inserted_id)}
+#     return {"message": "Self verification initiated", "verificationId": str(res.inserted_id)}
 
 
 # ------------------------------------------------------------
 # 2) CANDIDATE STARTS SELF VERIFICATION
 # ------------------------------------------------------------
-@app.post("/self/start")
-async def selfVerifyStartV2(
-    candidateId: str = Form(...),
-    organizationId: str = Form(...),
-    email: str = Form(...),
-    aadhaarLast4: str = Form(...)
-):
-    """Candidate authenticates using 4 values from the email."""
+# @app.post("/self/start")
+# async def selfVerifyStartV2(
+#     candidateId: str = Form(...),
+#     organizationId: str = Form(...),
+#     email: str = Form(...),
+#     aadhaarLast4: str = Form(...)
+# ):
+#     """Candidate authenticates using 4 values from the email."""
     
-    try:
-        cid = ObjectId(candidateId)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid candidateId")
+#     try:
+#         cid = ObjectId(candidateId)
+#     except:
+#         raise HTTPException(status_code=400, detail="Invalid candidateId")
 
-    cand = await candidatesCol.find_one({"_id": cid})
-    if not cand:
-        raise HTTPException(status_code=404, detail="Candidate not found")
+#     cand = await candidatesCol.find_one({"_id": cid})
+#     if not cand:
+#         raise HTTPException(status_code=404, detail="Candidate not found")
 
-    if str(cand.get("organizationId")) != organizationId:
-        raise HTTPException(status_code=403, detail="Organization mismatch")
+#     if str(cand.get("organizationId")) != organizationId:
+#         raise HTTPException(status_code=403, detail="Organization mismatch")
 
-    if cand.get("email", "").lower().strip() != email.lower().strip():
-        raise HTTPException(status_code=403, detail="Email mismatch")
+#     if cand.get("email", "").lower().strip() != email.lower().strip():
+#         raise HTTPException(status_code=403, detail="Email mismatch")
 
-    aadhaar = cand.get("aadhaarNumber", "")
-    if not aadhaar.endswith(aadhaarLast4):
-        raise HTTPException(status_code=403, detail="Aadhaar last4 mismatch")
+#     aadhaar = cand.get("aadhaarNumber", "")
+#     if not aadhaar.endswith(aadhaarLast4):
+#         raise HTTPException(status_code=403, detail="Aadhaar last4 mismatch")
 
-    # Fetch verification doc
-    ver = await verificationsCol.find_one({
-        "candidateId": candidateId,
-        "organizationId": organizationId,
-        "mode": "SELF"
-    })
-    if not ver:
-        raise HTTPException(status_code=404, detail="Verification not found")
+#     # Fetch verification doc
+#     ver = await verificationsCol.find_one({
+#         "candidateId": candidateId,
+#         "organizationId": organizationId,
+#         "mode": "SELF"
+#     })
+#     if not ver:
+#         raise HTTPException(status_code=404, detail="Verification not found")
 
-    # Check expiry
-    expires = ver.get("selfInfo", {}).get("expiresAt")
-    if not expires:
-        raise HTTPException(status_code=500, detail="Invalid verification state")
+#     # Check expiry
+#     expires = ver.get("selfInfo", {}).get("expiresAt")
+#     if not expires:
+#         raise HTTPException(status_code=500, detail="Invalid verification state")
 
-    expiry_dt = datetime.fromisoformat(expires)
+#     expiry_dt = datetime.fromisoformat(expires)
 
-    if datetime.now(timezone.utc) > expiry_dt:
-        raise HTTPException(status_code=410, detail="Verification link expired. Contact HR.")
+#     if datetime.now(timezone.utc) > expiry_dt:
+#         raise HTTPException(status_code=410, detail="Verification link expired. Contact HR.")
 
-    # Start verification
-    await verificationsCol.update_one(
-        {"_id": ver["_id"]},
-        {"$set": {
-            "overallStatus": "IN_PROGRESS",
-            "selfInfo.startedAt": datetime.now(timezone.utc).isoformat()
-        }}
-    )
+#     # Start verification
+#     await verificationsCol.update_one(
+#         {"_id": ver["_id"]},
+#         {"$set": {
+#             "overallStatus": "IN_PROGRESS",
+#             "selfInfo.startedAt": datetime.now(timezone.utc).isoformat()
+#         }}
+#     )
 
-    safe = {
-        "verificationId": str(ver["_id"]),
-        "candidateName": ver["candidateName"],
-        "organizationName": ver["organizationName"],
-        "currentStage": ver["currentStage"],
-        "overallStatus": "IN_PROGRESS",
-        "stages": ver["stages"],
-        "expiresAt": expires
-    }
-    return safe
+#     safe = {
+#         "verificationId": str(ver["_id"]),
+#         "candidateName": ver["candidateName"],
+#         "organizationName": ver["organizationName"],
+#         "currentStage": ver["currentStage"],
+#         "overallStatus": "IN_PROGRESS",
+#         "stages": ver["stages"],
+#         "expiresAt": expires
+#     }
+#     return safe
 
 
-# ------------------------------------------------------------
-# 3) CANDIDATE SUBMITS CHECK
-# ------------------------------------------------------------
-@app.post("/self/check")
-async def selfVerifyCheckV2(
-    verificationId: str = Form(...),
-    stage: str = Form(...),
-    check: str = Form(...),
-    metadata: str = Form(None),
-    file: UploadFile = File(None)
-):
-    """Candidate uploads text or file for a check."""
+# # ------------------------------------------------------------
+# # 3) CANDIDATE SUBMITS CHECK
+# # ------------------------------------------------------------
+# @app.post("/self/check")
+# async def selfVerifyCheckV2(
+#     verificationId: str = Form(...),
+#     stage: str = Form(...),
+#     check: str = Form(...),
+#     metadata: str = Form(None),
+#     file: UploadFile = File(None)
+# ):
+#     """Candidate uploads text or file for a check."""
 
-    try:
-        vid = ObjectId(verificationId)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid verificationId")
+#     try:
+#         vid = ObjectId(verificationId)
+#     except:
+#         raise HTTPException(status_code=400, detail="Invalid verificationId")
 
-    ver = await verificationsCol.find_one({"_id": vid})
-    if not ver:
-        raise HTTPException(status_code=404, detail="Verification not found")
+#     ver = await verificationsCol.find_one({"_id": vid})
+#     if not ver:
+#         raise HTTPException(status_code=404, detail="Verification not found")
 
-    if ver.get("overallStatus") != "IN_PROGRESS":
-        raise HTTPException(status_code=403, detail="Verification not active")
+#     if ver.get("overallStatus") != "IN_PROGRESS":
+#         raise HTTPException(status_code=403, detail="Verification not active")
 
-    if stage != ver.get("currentStage"):
-        raise HTTPException(status_code=403, detail="Stage mismatch")
+#     if stage != ver.get("currentStage"):
+#         raise HTTPException(status_code=403, detail="Stage mismatch")
 
-    stageList = ver["stages"].get(stage, [])
-    idx = next((i for i, c in enumerate(stageList) if c["check"] == check), None)
-    if idx is None:
-        raise HTTPException(status_code=400, detail="Check not found")
+#     stageList = ver["stages"].get(stage, [])
+#     idx = next((i for i, c in enumerate(stageList) if c["check"] == check), None)
+#     if idx is None:
+#         raise HTTPException(status_code=400, detail="Check not found")
 
-    # Block if prior failed
-    for p in stageList[:idx]:
-        if p["status"] == "FAILED":
-            raise HTTPException(status_code=403, detail="Previous check failed")
+#     # Block if prior failed
+#     for p in stageList[:idx]:
+#         if p["status"] == "FAILED":
+#             raise HTTPException(status_code=403, detail="Previous check failed")
 
-    # File handling (you may later upload to S3)
-    attachment = None
-    if file:
-        content = await file.read()
-        attachment = {
-            "filename": file.filename,
-            "size": len(content),
-            "contentType": file.content_type,
-            "uploadedAt": datetime.now(timezone.utc).isoformat()
-        }
+#     # File handling (you may later upload to S3)
+#     attachment = None
+#     if file:
+#         content = await file.read()
+#         attachment = {
+#             "filename": file.filename,
+#             "size": len(content),
+#             "contentType": file.content_type,
+#             "uploadedAt": datetime.now(timezone.utc).isoformat()
+#         }
 
-    # Run verification check via your existing engine
-    candidate = await candidatesCol.find_one({"_id": ObjectId(ver["candidateId"])})
-    try:
-        status, remarks = await run_verification(check, candidate)
-    except Exception as e:
-        status, remarks = "FAILED", f"Runtime error: {str(e)}"
+#     # Run verification check via your existing engine
+#     candidate = await candidatesCol.find_one({"_id": ObjectId(ver["candidateId"])})
+#     try:
+#         status, remarks = await run_verification(check, candidate)
+#     except Exception as e:
+#         status, remarks = "FAILED", f"Runtime error: {str(e)}"
 
-    # Update check entry
-    update = {
-        f"stages.{stage}.{idx}.status": status,
-        f"stages.{stage}.{idx}.remarks": remarks,
-        f"stages.{stage}.{idx}.submittedAt": datetime.now(timezone.utc).isoformat(),
-        "selfInfo.lastActivity": datetime.now(timezone.utc).isoformat()
-    }
-    if attachment:
-        update[f"stages.{stage}.{idx}.attachments"] = [attachment]
+#     # Update check entry
+#     update = {
+#         f"stages.{stage}.{idx}.status": status,
+#         f"stages.{stage}.{idx}.remarks": remarks,
+#         f"stages.{stage}.{idx}.submittedAt": datetime.now(timezone.utc).isoformat(),
+#         "selfInfo.lastActivity": datetime.now(timezone.utc).isoformat()
+#     }
+#     if attachment:
+#         update[f"stages.{stage}.{idx}.attachments"] = [attachment]
 
-    await verificationsCol.update_one({"_id": vid}, {"$set": update})
+#     await verificationsCol.update_one({"_id": vid}, {"$set": update})
 
-    # If failed → stop
-    if status == "FAILED":
-        await verificationsCol.update_one(
-            {"_id": vid},
-            {"$set": {"overallStatus": "FAILED", "failureStage": f"{stage}_{check}"}}
-        )
-        return {"status": status, "remarks": remarks}
+#     # If failed → stop
+#     if status == "FAILED":
+#         await verificationsCol.update_one(
+#             {"_id": vid},
+#             {"$set": {"overallStatus": "FAILED", "failureStage": f"{stage}_{check}"}}
+#         )
+#         return {"status": status, "remarks": remarks}
 
-    # If stage fully complete, move forward
-    fresh = await verificationsCol.find_one({"_id": vid})
-    allChecks = fresh["stages"][stage]
+#     # If stage fully complete, move forward
+#     fresh = await verificationsCol.find_one({"_id": vid})
+#     allChecks = fresh["stages"][stage]
 
-    if all(c["status"] == "COMPLETED" for c in allChecks):
+#     if all(c["status"] == "COMPLETED" for c in allChecks):
 
-        nextStage = None
+#         nextStage = None
 
-        if stage == "primary":
-            nextStage = "secondary" if fresh["stages"].get("secondary") else "final"
+#         if stage == "primary":
+#             nextStage = "secondary" if fresh["stages"].get("secondary") else "final"
 
-        elif stage == "secondary":
-            nextStage = "final"
+#         elif stage == "secondary":
+#             nextStage = "final"
 
-        if nextStage:
-            await verificationsCol.update_one(
-                {"_id": vid},
-                {"$set": {"currentStage": nextStage}}
-            )
-        else:
-            await verificationsCol.update_one(
-                {"_id": vid},
-                {"$set": {"overallStatus": "COMPLETED"}}
-            )
-            await candidatesCol.update_one(
-                {"_id": ObjectId(ver["candidateId"])},
-                {"$set": {"status": "VERIFIED"}}
-            )
+#         if nextStage:
+#             await verificationsCol.update_one(
+#                 {"_id": vid},
+#                 {"$set": {"currentStage": nextStage}}
+#             )
+#         else:
+#             await verificationsCol.update_one(
+#                 {"_id": vid},
+#                 {"$set": {"overallStatus": "COMPLETED"}}
+#             )
+#             await candidatesCol.update_one(
+#                 {"_id": ObjectId(ver["candidateId"])},
+#                 {"$set": {"status": "VERIFIED"}}
+#             )
 
-    return {"status": status, "remarks": remarks}
+#     return {"status": status, "remarks": remarks}
 
 
 # ------------------------------------------------------------
 # 4) ADMIN OVERRIDE: RUN STAGE MANUALLY
 # ------------------------------------------------------------
-@app.post("/secure/self/runStage")
-async def adminRunSelfStage(body: dict = Body(...), user: dict = Depends(requireAuth)):
-    """
-    Admin manually runs a stage for SELF verification.
-    Only allowed if:
-        - Candidate has not completed stage
-        - Admin belongs to that org (or super admin)
-    """
+# @app.post("/secure/self/runStage")
+# async def adminRunSelfStage(body: dict = Body(...), user: dict = Depends(requireAuth)):
+#     """
+#     Admin manually runs a stage for SELF verification.
+#     Only allowed if:
+#         - Candidate has not completed stage
+#         - Admin belongs to that org (or super admin)
+#     """
 
-    verificationId = body.get("verificationId")
-    stage = body.get("stage")
-    if not verificationId or not stage:
-        raise HTTPException(status_code=400, detail="verificationId and stage required")
+#     verificationId = body.get("verificationId")
+#     stage = body.get("stage")
+#     if not verificationId or not stage:
+#         raise HTTPException(status_code=400, detail="verificationId and stage required")
 
-    try:
-        vid = ObjectId(verificationId)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid verificationId")
+#     try:
+#         vid = ObjectId(verificationId)
+#     except:
+#         raise HTTPException(status_code=400, detail="Invalid verificationId")
 
-    ver = await verificationsCol.find_one({"_id": vid})
-    if not ver:
-        raise HTTPException(status_code=404, detail="Not found")
+#     ver = await verificationsCol.find_one({"_id": vid})
+#     if not ver:
+#         raise HTTPException(status_code=404, detail="Not found")
 
-    # ---- Role Authorization ----
-    role = user.get("role")
-    userEmail = user.get("email", "").lower().strip()
-    userOrg = str(user.get("organizationId", ""))
+#     # ---- Role Authorization ----
+#     role = user.get("role")
+#     userEmail = user.get("email", "").lower().strip()
+#     userOrg = str(user.get("organizationId", ""))
 
-    verOrg = ver.get("organizationId")
+#     verOrg = ver.get("organizationId")
 
-    allowed = False
+#     allowed = False
 
-    if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
-        allowed = True
-    elif role == "SUPER_ADMIN_HELPER":
-        if verOrg in [str(x) for x in user.get("accessibleOrganizations", [])]:
-            allowed = True
-    elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
-        allowed = True
-    elif role == "ORG_HR" and verOrg == userOrg:
-        allowed = True
-    elif role == "HELPER":
-        # only if created by the helper
-        cand = await candidatesCol.find_one({"_id": ObjectId(ver["candidateId"])})
-        if cand and cand.get("createdBy", "").lower().strip() == userEmail:
-            allowed = True
+#     if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+#         allowed = True
+#     elif role == "SUPER_ADMIN_HELPER":
+#         if verOrg in [str(x) for x in user.get("accessibleOrganizations", [])]:
+#             allowed = True
+#     elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
+#         allowed = True
+#     elif role == "ORG_HR" and verOrg == userOrg:
+#         allowed = True
+#     elif role == "HELPER":
+#         # only if created by the helper
+#         cand = await candidatesCol.find_one({"_id": ObjectId(ver["candidateId"])})
+#         if cand and cand.get("createdBy", "").lower().strip() == userEmail:
+#             allowed = True
 
-    if not allowed:
-        raise HTTPException(status_code=403, detail="Not authorized to run this stage")
+#     if not allowed:
+#         raise HTTPException(status_code=403, detail="Not authorized to run this stage")
 
-    # ---- Check stage exists ----
-    stageChecks = ver.get("stages", {}).get(stage)
-    if not stageChecks:
-        raise HTTPException(status_code=404, detail=f"Stage '{stage}' not found")
+#     # ---- Check stage exists ----
+#     stageChecks = ver.get("stages", {}).get(stage)
+#     if not stageChecks:
+#         raise HTTPException(status_code=404, detail=f"Stage '{stage}' not found")
 
-    # ---- If already completed ----
-    if all(c["status"] == "COMPLETED" for c in stageChecks):
-        return {"message": f"Stage '{stage}' already completed"}
+#     # ---- If already completed ----
+#     if all(c["status"] == "COMPLETED" for c in stageChecks):
+#         return {"message": f"Stage '{stage}' already completed"}
 
-    # Run each check
-    for idx, chk in enumerate(stageChecks):
-        checkName = chk["check"]
-        if chk["status"] == "COMPLETED":
-            continue
+#     # Run each check
+#     for idx, chk in enumerate(stageChecks):
+#         checkName = chk["check"]
+#         if chk["status"] == "COMPLETED":
+#             continue
 
-        try:
-            status, remarks = await run_verification(checkName, await candidatesCol.find_one({"_id": ObjectId(ver["candidateId"])}))
-        except Exception as e:
-            status, remarks = "FAILED", f"Runtime error: {str(e)}"
+#         try:
+#             status, remarks = await run_verification(checkName, await candidatesCol.find_one({"_id": ObjectId(ver["candidateId"])}))
+#         except Exception as e:
+#             status, remarks = "FAILED", f"Runtime error: {str(e)}"
 
-        update = {
-            f"stages.{stage}.{idx}.status": status,
-            f"stages.{stage}.{idx}.remarks": remarks,
-            f"stages.{stage}.{idx}.submittedAt": datetime.now(timezone.utc).isoformat()
-        }
-        await verificationsCol.update_one({"_id": vid}, {"$set": update})
+#         update = {
+#             f"stages.{stage}.{idx}.status": status,
+#             f"stages.{stage}.{idx}.remarks": remarks,
+#             f"stages.{stage}.{idx}.submittedAt": datetime.now(timezone.utc).isoformat()
+#         }
+#         await verificationsCol.update_one({"_id": vid}, {"$set": update})
 
-        if status == "FAILED":
-            await verificationsCol.update_one(
-                {"_id": vid},
-                {"$set": {"overallStatus": "FAILED", "failureStage": f"{stage}_{checkName}"}}
-            )
-            return {"message": "Stage failed", "failedCheck": checkName}
+#         if status == "FAILED":
+#             await verificationsCol.update_one(
+#                 {"_id": vid},
+#                 {"$set": {"overallStatus": "FAILED", "failureStage": f"{stage}_{checkName}"}}
+#             )
+#             return {"message": "Stage failed", "failedCheck": checkName}
 
-    # Mark stage completed
-    await verificationsCol.update_one(
-        {"_id": vid},
-        {"$set": {"currentStage": stage, "overallStatus": "IN_PROGRESS"}}
-    )
+#     # Mark stage completed
+#     await verificationsCol.update_one(
+#         {"_id": vid},
+#         {"$set": {"currentStage": stage, "overallStatus": "IN_PROGRESS"}}
+#     )
 
-    return {"message": "Stage completed by admin", "stage": stage}
+#     return {"message": "Stage completed by admin", "stage": stage}
 
 
 # ------------------------------------------------------------
@@ -3691,14 +3670,45 @@ async def addCandidate(body: dict = Body(...), user: dict = Depends(requireAuth)
 # -------------------------------
 @app.get("/secure/activityLogs")
 async def getActivityLogs(user: dict = Depends(requireAuth)):
-    query = {}
-    if user.get("role") not in ["SUPER_ADMIN", "SUPER_SPOC"] :
-        query["organizationId"] = user.get("organizationId")
+    role = user.get("role")
+    userOrgId = str(user.get("organizationId"))
+    accessibleOrgs = [str(x) for x in user.get("accessibleOrganizations", [])]
 
+    # -----------------------------------------
+    # ROLE-BASED ACCESS RESTRICTION
+    # -----------------------------------------
+
+    # HELPER → NOT ALLOWED
+    if role == "HELPER":
+        raise HTTPException(status_code=403, detail="You are not allowed to view logs")
+
+    query = {}
+
+    # SUPER_ADMIN & SUPER_SPOC → full access
+    if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+        pass  # no filter
+
+    # SUPER_ADMIN_HELPER → only assigned orgs
+    elif role == "SUPER_ADMIN_HELPER":
+        if not accessibleOrgs:
+            raise HTTPException(403, "No organizations assigned")
+        query["organizationId"] = {"$in": accessibleOrgs}
+
+    # ORG_HR & SPOC → only their own org logs
+    elif role in ["ORG_HR", "SPOC"]:
+        query["organizationId"] = userOrgId
+
+    # Unknown roles → block
+    else:
+        raise HTTPException(status_code=403, detail="You are not allowed to view logs")
+
+    # -----------------------------------------
+    # EXECUTE QUERY
+    # -----------------------------------------
     cursor = activityLogsCol.find(query).sort("timestamp", -1)
     logs = await cursor.to_list()
 
-    # Convert ObjectIds to string for each log (same convention as other functions)
+    # Convert ObjectIds to string
     for log in logs:
         if "_id" in log:
             log["_id"] = str(log["_id"])
@@ -3707,7 +3717,6 @@ async def getActivityLogs(user: dict = Depends(requireAuth)):
         if "organizationId" in log and isinstance(log["organizationId"], ObjectId):
             log["organizationId"] = str(log["organizationId"])
 
-    # Use JSONResponse and jsonable_encoder like all other endpoints
     return JSONResponse(
         status_code=200,
         content=jsonable_encoder({
@@ -3715,6 +3724,7 @@ async def getActivityLogs(user: dict = Depends(requireAuth)):
             "logs": logs
         })
     )
+
 # get specific logs
 @app.get("/secure/recentImportantActivity")
 async def getRecentImportantActivity(
@@ -3797,23 +3807,6 @@ async def getRecentImportantActivity(
         })
     )
 
-
-from fastapi import APIRouter, Body, HTTPException
-import re
-from bson import ObjectId
-from utils.email_utils import send_password_reset_email
-
-
-def validatePassword(pwd: str):
-    if len(pwd) < 8:
-        return False
-    if not re.search(r"[A-Z]", pwd):
-        return False
-    if not re.search(r"[0-9]", pwd):
-        return False
-    if not re.search(r"[\W_]", pwd):
-        return False
-    return True
 
 
 @app.post("/auth/resetPassword")
