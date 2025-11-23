@@ -3728,15 +3728,11 @@ async def getActivityLogs(user: dict = Depends(requireAuth)):
 # get specific logs
 @app.get("/secure/recentImportantActivity")
 async def getRecentImportantActivity(
-    noOfLogs: int = 50,   # frontend can request any number
+    noOfLogs: int = 50,
     user: dict = Depends(requireAuth)
 ):
 
-    # -----------------------------------------
-    # IMPORTANT LOG TYPES
-    # -----------------------------------------
     IMPORTANT_LOG_TYPES = [
-        # OLD BASE TYPES
         "Add Candidate",
         "New Verification Initiated",
         "Add User",
@@ -3746,8 +3742,6 @@ async def getRecentImportantActivity(
         "Error",
         "Login",
         "Logout",
-
-        # NEW TYPES FROM YOU
         "Password Reset Failed",
         "Update Organization Failed",
         "Updated Organization",
@@ -3763,29 +3757,77 @@ async def getRecentImportantActivity(
         "Created Organization"
     ]
 
-    # -----------------------------------------
-    # ROLE RESTRICTION
-    # -----------------------------------------
+    role = user.get("role")
+    userOrgId = str(user.get("organizationId"))
+    accessibleOrgs = [str(o) for o in user.get("accessibleOrganizations", [])]
+
     query = {
         "action": {"$in": IMPORTANT_LOG_TYPES}
     }
 
-    if user.get("role") not in ["SUPER_ADMIN", "SUPER_SPOC"]:
-        query["organizationId"] = user.get("organizationId")
+    # -----------------------------------------
+    # HELPER → NOT ALLOWED
+    # -----------------------------------------
+    if role == "HELPER":
+        raise HTTPException(
+            status_code=403,
+            detail="You are not allowed to view logs"
+        )
 
     # -----------------------------------------
-    # FETCH LOGS LIMIT = noOfLogs
+    # SUPER_ADMIN + SUPER_SPOC → FULL ACCESS
+    # -----------------------------------------
+    if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+        pass  # no org restrictions
+
+    # -----------------------------------------
+    # SUPER_ADMIN_HELPER → ONLY ACCESSIBLE ORGS
+    # -----------------------------------------
+    elif role == "SUPER_ADMIN_HELPER":
+
+        if not accessibleOrgs:
+            raise HTTPException(403, "No organizations assigned to this helper")
+
+        objIds = []
+        for oid in accessibleOrgs:
+            try:
+                objIds.append(ObjectId(oid))
+            except:
+                pass
+
+        # Match logs with organizationId as string OR objectId
+        query["$or"] = [
+            {"organizationId": {"$in": accessibleOrgs}},   # string storage
+            {"organizationId": {"$in": objIds}}            # ObjectId storage
+        ]
+
+    # -----------------------------------------
+    # ORG_HR / SPOC → ONLY THEIR ORG
+    # -----------------------------------------
+    elif role in ["ORG_HR", "SPOC"]:
+        query["organizationId"] = userOrgId
+
+    # -----------------------------------------
+    # UNKNOWN ROLES → DENY
+    # -----------------------------------------
+    else:
+        raise HTTPException(
+            status_code=403,
+            detail="You are not allowed to view logs"
+        )
+
+    # -----------------------------------------
+    # FETCH LOGS
     # -----------------------------------------
     cursor = (
         activityLogsCol
-        .find(query)
-        .sort("timestamp", -1)
-        .limit(noOfLogs)
+            .find(query)
+            .sort("timestamp", -1)
+            .limit(noOfLogs)
     )
-    
+
     logs = await cursor.to_list(noOfLogs)
 
-    # Convert ObjectIDs → string
     for log in logs:
         if "_id" in log:
             log["_id"] = str(log["_id"])
@@ -3794,9 +3836,6 @@ async def getRecentImportantActivity(
         if "organizationId" in log and isinstance(log["organizationId"], ObjectId):
             log["organizationId"] = str(log["organizationId"])
 
-    # -----------------------------------------
-    # RETURN RESPONSE
-    # -----------------------------------------
     return JSONResponse(
         status_code=200,
         content=jsonable_encoder({
@@ -3806,7 +3845,6 @@ async def getRecentImportantActivity(
             "logs": logs
         })
     )
-
 
 
 @app.post("/auth/resetPassword")
@@ -4311,6 +4349,65 @@ async def getAllTickets(user: dict = Depends(requireAuth)):
     return {"tickets": data}
 
 
+@app.get("/secure/tickets/{ticketId}")
+async def getTicket(ticketId: str, user: dict = Depends(requireAuth)):
+    ticket = await ticketsCol.find_one({"_id": ObjectId(ticketId)})
+    if not ticket:
+        raise HTTPException(404, "Ticket not found")
+
+    # Check org access
+    if str(ticket["organizationId"]) != str(user["organizationId"]) and user.get("role") not in ["SUPER_ADMIN", "SUPER_SPOC"]:
+        raise HTTPException(403, "Not allowed to access this ticket")
+
+    ticket["_id"] = str(ticket["_id"])
+    return ticket
+
+
+@app.post("/secure/tickets/{ticketId}/attachment")
+async def uploadTicketAttachment(
+    ticketId: str,
+    file: UploadFile = File(...),
+    user: dict = Depends(requireAuth)
+):
+    ticket = await ticketsCol.find_one({"_id": ObjectId(ticketId)})
+    if not ticket:
+        raise HTTPException(404, "Ticket not found")
+
+    # Org boundary check
+    if str(ticket["organizationId"]) != str(user["organizationId"]):
+        raise HTTPException(403, "Cannot upload attachment to ticket of another org")
+
+    # Upload file
+    upl = cloudinary.uploader.upload(
+        file.file,
+        folder=f"bgvapp/tickets/{ticketId}"
+    )
+
+    attachmentObj = {
+        "url": upl["secure_url"],
+        "fileName": file.filename,
+        "uploadedBy": user.get("email"),
+        "uploadedAt": now()
+    }
+
+    await ticketsCol.update_one(
+        {"_id": ObjectId(ticketId)},
+        {"$push": {"attachments": attachmentObj}}
+    )
+
+    await logActivity(
+        user,
+        "Ticket Attachment Uploaded",
+        f"Attachment added to ticket #{ticketId}",
+        "Success"
+    )
+
+    return {
+        "message": "Attachment uploaded",
+        "url": upl["secure_url"]
+    }
+
+
 @app.post("/secure/tickets/{ticketId}/comment")
 async def addComment(ticketId: str, body: dict = Body(...), user: dict = Depends(requireAuth)):
     message = body.get("message")
@@ -4430,3 +4527,81 @@ async def assignTicket(ticketId: str, body: dict = Body(...), user: dict = Depen
     )
 
     return {"message": "Ticket assigned"}
+
+
+@app.post("/secure/tickets/{ticketId}/close")
+async def closeTicket(
+    ticketId: str,
+    body: dict = Body(...),
+    user: dict = Depends(requireAuth)
+):
+    if user.get("role") not in ["ORG_HR", "SPOC", "SUPER_ADMIN", "SUPER_SPOC"]:
+        raise HTTPException(403, "Not authorized")
+
+    reason = body.get("reason", "No reason provided")
+
+    ticket = await ticketsCol.find_one({"_id": ObjectId(ticketId)})
+    if not ticket:
+        raise HTTPException(404, "Ticket not found")
+
+    # org restriction
+    if str(ticket["organizationId"]) != str(user["organizationId"]):
+        raise HTTPException(403, "Not allowed to close ticket of another org")
+
+    await ticketsCol.update_one(
+        {"_id": ObjectId(ticketId)},
+        {
+            "$set": {
+                "status": "CLOSED",
+                "closedReason": reason,
+                "closedAt": now(),
+                "updatedAt": now()
+            }
+        }
+    )
+
+    await logActivity(
+        user,
+        "Ticket Closed",
+        f"Ticket #{ticketId} closed. Reason: {reason}",
+        "Success"
+    )
+
+    return { "message": "Ticket closed" }
+
+@app.post("/secure/tickets/{ticketId}/reopen")
+async def reopenTicket(
+    ticketId: str,
+    body: dict = Body(...),
+    user: dict = Depends(requireAuth)
+):
+    reason = body.get("reason", "No reason provided")
+
+    ticket = await ticketsCol.find_one({"_id": ObjectId(ticketId)})
+    if not ticket:
+        raise HTTPException(404, "Ticket not found")
+
+    # org restriction
+    if str(ticket["organizationId"]) != str(user["organizationId"]):
+        raise HTTPException(403, "Not allowed to reopen ticket of another org")
+
+    await ticketsCol.update_one(
+        {"_id": ObjectId(ticketId)},
+        {
+            "$set": {
+                "status": "REOPENED",
+                "reopenReason": reason,
+                "reopenedAt": now(),
+                "updatedAt": now()
+            }
+        }
+    )
+
+    await logActivity(
+        user,
+        "Ticket Reopened",
+        f"Ticket #{ticketId} reopened. Reason: {reason}",
+        "Success"
+    )
+
+    return { "message": "Ticket reopened" }
