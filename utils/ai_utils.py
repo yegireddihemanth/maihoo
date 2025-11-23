@@ -3,259 +3,203 @@ import docx
 import uuid
 from datetime import datetime
 from pymongo import MongoClient
-import json
-import re
 import torch
 from sentence_transformers import util
+import re
 
-# -----------------------------------------------------
-# GOOGLE GEMINI CONFIG
-# -----------------------------------------------------
-from google import genai
-from dotenv import load_dotenv
-import os
+from ollama import Client
 
-# Load .env (important!)
-load_dotenv()
+# ------------------------------------------------
+# OLLAMA CLIENT
+# ------------------------------------------------
+ollama = Client()
 
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-
-if not GEMINI_KEY:
-    raise ValueError("GEMINI_API_KEY is missing! Set it in .env or Render environment variables.")
-
-client = genai.Client(api_key=GEMINI_KEY)
+LLM_MODEL = "llama3.2"
+EMBED_MODEL = "nomic-embed-text"
+EMB_DIM = 768  # force final embedding size
 
 
-
-
-# -----------------------------------------------------
-# MongoDB Configuration
-# -----------------------------------------------------
+# ------------------------------------------------
+# MONGO
+# ------------------------------------------------
 mongoUri = "mongodb+srv://maihoo:akonpopStar%40143@maihoo.ztaytqd.mongodb.net/?appName=maihoo"
-mongoDbName = "bgv_core"
-
 client_mongo = MongoClient(mongoUri)
-db = client_mongo[mongoDbName]
+db = client_mongo["bgv_core"]
 collection = db["resume_matches"]
 
 
-# -----------------------------------------------------
-# TEXT EXTRACTION HELPERS
-# -----------------------------------------------------
+# ------------------------------------------------
+# TEXT EXTRACTORS
+# ------------------------------------------------
 def extract_text_from_pdf(file):
-    pdf = PyPDF2.PdfReader(file)
-    text = ""
-    for page in pdf.pages:
-        try:
-            text += (page.extract_text() or "") + "\n"
-        except:
-            continue
-    return text
-
-
-def extract_text_from_docx(file):
-    doc = docx.Document(file)
-    return "\n".join([p.text for p in doc.paragraphs])
-
-
-# -----------------------------------------------------
-# GEMINI EMBEDDING FUNCTION (MAIN CHANGE)
-# -----------------------------------------------------
-def get_embedding(text: str):
-    """
-    Converts text to a vector using Gemini embeddings.
-    """
     try:
-        resp = client.models.embed_content(
-            model="gemini-embedding-001",
-            contents=text
-        )
-        return resp.embeddings[0].values
-    except Exception as e:
-        print("Embedding Error:", e)
-        return [0.0] * 768  # fail-safe vector size
-
-
-# -----------------------------------------------------
-# PROMPTS
-# -----------------------------------------------------
-def build_clean_prompt(text):
-    return f"""
-Extract ONLY:
-
-- Technical skills
-- Tools & technologies
-- Programming languages
-- Frameworks
-- ML/AI terms
-- Project titles
-- Job roles
-- Responsibilities
-- Domain keywords
-
-Copy EXACT text from the document.
-NO rewriting.
-NO summary.
-Return ONE cleaned text block.
-
-TEXT:
-{text}
-
-Return cleaned content only:
-"""
-
-
-def build_skill_prompt(text):
-    return f"""
-Extract only technical skills.
-Return comma-separated.
-No sentences.
-
-TEXT:
-{text}
-"""
-
-
-def build_domain_prompt(text):
-    return f"""
-Pick one domain only:
-
-["Mechanical", "Software", "AI/ML", "Civil", "Electrical", "Electronics", "Business", "Other"]
-
-TEXT:
-{text}
-
-Return one domain word:
-"""
-
-
-# -----------------------------------------------------
-# GEMINI LLM WRAPPER
-# -----------------------------------------------------
-def call_llm(prompt):
-    try:
-        resp = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt
-        )
-        out = resp.text.strip()
-
-        if not out:
-            return ""
-        if len(out) < 5:
-            return ""
-
-        return out
+        pdf = PyPDF2.PdfReader(file)
+        return "\n".join([(p.extract_text() or "") for p in pdf.pages])
     except:
         return ""
 
 
-# -----------------------------------------------------
+def extract_text_from_docx(file):
+    try:
+        doc = docx.Document(file)
+        return "\n".join([p.text for p in doc.paragraphs])
+    except:
+        return ""
+
+
+# ------------------------------------------------
+# CLEAN LLaMA OUTPUT
+# ------------------------------------------------
+def clean_llama_output(text):
+    if not text:
+        return ""
+
+    text = re.sub(r"\*\*|__", "", text)
+    text = re.sub(r"[•\-*]\s*", "", text)
+    text = re.sub(r"Here is.*?:", "", text, flags=re.I)
+    text = re.sub(r"Here are.*?:", "", text, flags=re.I)
+    text = re.sub(r"[#>\[\]\(\)]", "", text)
+
+    return text.strip()
+
+
+# ------------------------------------------------
+# EXTRACTION PROMPT
+# ------------------------------------------------
+def build_prompt(text):
+    return f"""
+Extract ALL important technical and job-related information from the text.
+
+Return ONLY ONE single plain text paragraph containing:
+skills, tools, experience, frameworks, projects, job roles, domain, achievements.
+
+NO bullet points.
+NO markdown.
+NO headings.
+NO explanation.
+ONE clean paragraph only.
+
+TEXT:
+{text}
+"""
+
+
+# ------------------------------------------------
+# CALL LLaMA3 FOR EXTRACTION
+# ------------------------------------------------
+def extract_with_llama(text):
+    try:
+        if len(text) > 5000:
+            text = text[:5000]
+
+        print("\n🟣 LLM CALL STARTED")
+        prompt = build_prompt(text)
+
+        res = ollama.chat(
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        raw = res["message"]["content"]
+        return clean_llama_output(raw)
+
+    except Exception as e:
+        print("❌ LLM ERROR:", e)
+        return ""
+
+
+# ------------------------------------------------
+# EMBEDDINGS (PYTHON OLLAMA SDK ONLY)
+# ------------------------------------------------
+def fix_dim(v):
+    if len(v) > EMB_DIM:
+        return v[:EMB_DIM]
+    if len(v) < EMB_DIM:
+        return v + [0.0] * (EMB_DIM - len(v))
+    return v
+
+
+def get_embedding(text):
+    try:
+        print("\n🔵 GENERATING EMBEDDING USING OLLAMA PYTHON SDK")
+
+        res = ollama.embeddings(
+            model=EMBED_MODEL,
+            prompt=text
+        )
+
+        vec = res["embedding"]
+        print("Embedding size returned =", len(vec))
+
+        fixed = fix_dim(vec)
+        print("Final embedding size =", len(fixed))
+
+        return fixed
+
+    except Exception as e:
+        print("❌ EMBEDDING ERROR:", e)
+        return [0.0] * EMB_DIM
+
+
+# ------------------------------------------------
 # MAIN PIPELINE
-# -----------------------------------------------------
+# ------------------------------------------------
 async def generate_resume_embeddings_and_rank(resumes, jd):
 
-    resumeData = []
-    pipelineRunId = f"RUN_{uuid.uuid4()}"
+    runId = f"RUN_{uuid.uuid4()}"
+    collection.insert_one({"pipelineRunId": runId, "createdAt": datetime.utcnow()})
 
-    collection.insert_one({
-        "pipelineRunId": pipelineRunId,
-        "jdText": jd,
-        "createdAt": datetime.utcnow(),
-        "stepStatus": {
-            "textExtraction": "pending",
-            "cleaning": "pending",
-            "skillExtraction": "pending",
-            "domainClassification": "pending",
-            "embeddingGeneration": "pending",
-            "similarityCalculation": "pending"
-        }
-    })
+    # ------------------ JD ------------------
+    jd_extracted = extract_with_llama(jd)
 
-    # ---------------- JD PROCESSING ----------------
+    print("\n==============================")
+    print("📘 JD EXTRACTED TEXT")
+    print("==============================")
+    print(jd_extracted[:1500], "\n")
 
-    jd_clean = call_llm(build_clean_prompt(jd))
-    if jd_clean == "":
-        jd_clean = jd
+    jd_vec = get_embedding(jd_extracted)
 
-    jd_skills = call_llm(build_skill_prompt(jd_clean))
-    jd_domain = call_llm(build_domain_prompt(jd_clean))
+    results = []
 
-    jd_skill_set = set([s.strip().lower() for s in jd_skills.split(",") if s.strip()])
+    # ------------------ RESUMES ------------------
+    for f in resumes:
 
-    # ************* GEMINI EMBEDDING *************
-    jd_vec = get_embedding(jd_clean)
+        print("\n=============================================")
+        print(f"📄 Processing Resume: {f.filename}")
+        print("=============================================")
 
-    collection.update_one(
-        {"pipelineRunId": pipelineRunId},
-        {"$set": {
-            "jdCleaned": jd_clean,
-            "jdSkills": list(jd_skill_set),
-            "jdDomain": jd_domain
-        }}
-    )
-
-    # -------------- RESUMES ------------------------
-
-    for file in resumes:
-
-        filename = file.filename.lower()
-
-        if filename.endswith(".pdf"):
-            raw = extract_text_from_pdf(file.file)
-        elif filename.endswith(".docx"):
-            raw = extract_text_from_docx(file.file)
+        if f.filename.lower().endswith(".pdf"):
+            raw = extract_text_from_pdf(f.file)
         else:
-            continue
+            raw = extract_text_from_docx(f.file)
 
-        clean_text = call_llm(build_clean_prompt(raw))
-        if clean_text == "":
-            clean_text = raw  # fallback
+        resume_extracted = extract_with_llama(raw)
 
-        resume_skills = call_llm(build_skill_prompt(clean_text))
-        resume_domain = call_llm(build_domain_prompt(clean_text))
+        print("\n==============================")
+        print("📄 RESUME EXTRACTED TEXT")
+        print("==============================")
+        print(resume_extracted[:1500], "\n")
 
-        skill_set = set([s.strip().lower() for s in resume_skills.split(",") if s.strip()])
+        resume_vec = get_embedding(resume_extracted)
 
-        # ************* GEMINI EMBEDDING *************
-        resume_vec = get_embedding(clean_text)
+        score = float(util.cos_sim(
+            torch.tensor(jd_vec),
+            torch.tensor(resume_vec)
+        ))
 
-        # Convert to tensors for cosine similarity
-        emb_score = float(util.cos_sim(
-            torch.tensor(resume_vec),
-            torch.tensor(jd_vec)
-        ).item())
+        print(f"🔥 FINAL SIMILARITY SCORE = {score}")
 
-        # Skill overlap score
-        if len(jd_skill_set) > 0:
-            overlap = len(jd_skill_set.intersection(skill_set))
-            skill_score = overlap / len(jd_skill_set)
-        else:
-            skill_score = 0
-
-        # Domain Score
-        domain_score = 1 if resume_domain.lower() == jd_domain.lower() else 0
-
-        final_score = (0.6 * skill_score) + (0.25 * emb_score) + (0.15 * domain_score)
-
-        resumeData.append({
-            "fileName": file.filename,
-            "finalScore": final_score,
-            "cleaned": clean_text,
-            "skills": list(skill_set),
-            "domain": resume_domain,
-            "embeddingScore": emb_score,
-            "skillScore": skill_score,
-            "domainScore": domain_score,
+        results.append({
+            "fileName": f.filename,
+            "similarity": score,
+            "extracted": resume_extracted
         })
 
-    # Sort & save
-    resumeData.sort(key=lambda x: x["finalScore"], reverse=True)
-    topFive = resumeData[:5]
+    results.sort(key=lambda x: x["similarity"], reverse=True)
 
     collection.update_one(
-        {"pipelineRunId": pipelineRunId},
-        {"$set": {"finalTopFive": topFive}}
+        {"pipelineRunId": runId},
+        {"$set": {"finalTopFive": results[:5]}}
     )
 
-    return topFive, pipelineRunId
+    return results[:5], runId

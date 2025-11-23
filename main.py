@@ -79,7 +79,7 @@ orgsCol = db["organizations"]
 verificationsCol = db["verifications"]
 activityLogsCol = db["activity_logs"]
 candidatesCol = db["candidates"] 
-
+ticketsCol = db['tickets']
 # -------------------------------
 # Utility
 # -------------------------------
@@ -4185,3 +4185,255 @@ async def getCertificateData(candidateId: str, user: dict = Depends(requireAuth)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+from fastapi import UploadFile, File, Body, Depends, HTTPException
+from bson import ObjectId
+import cloudinary.uploader
+from utils.ticket_utils import get_assignee, now
+from utils.email_utils import send_ticket_email
+
+
+# ----------------------------------------------------------
+# CREATE TICKET
+# ----------------------------------------------------------
+import json
+from fastapi import Form, File, UploadFile
+
+@app.post("/secure/createticket")
+async def createTicket(
+    body: str = Form(...),
+    attachments: list[UploadFile] = File(None),
+    user: dict = Depends(requireAuth)
+):
+    data = json.loads(body)
+
+    title = data.get("title")
+    description = data.get("description")
+    category = data.get("category")
+    priority = data.get("priority", "MEDIUM")
+
+
+    if not title or not description:
+        raise HTTPException(400, "Title and description required")
+
+    orgId = str(user.get("organizationId"))
+
+    # Auto assignment
+    assignee = await get_assignee(user, usersCol)
+    if not assignee:
+        raise HTTPException(500, "Unable to auto-assign ticket")
+
+    # Upload attachments
+    uploaded_files = []
+    if attachments:
+        for f in attachments:
+            upl = cloudinary.uploader.upload(
+                f.file,
+                folder="bgvapp/tickets"
+            )
+            uploaded_files.append({
+                "url": upl["secure_url"],
+                "fileName": f.filename,
+                "uploadedBy": user.get("email"),
+                "uploadedAt": now()
+            })
+
+    ticketDoc = {
+        "title": title,
+        "description": description,
+        "category": category,
+        "priority": priority,
+
+        "createdBy": user.get("email"),
+        "createdById": str(user.get("_id")),
+        "createdByRole": user.get("role"),
+        "organizationId": orgId,
+
+        "status": "OPEN",
+
+        "assignedTo": assignee.get("email"),
+        "assignedToId": str(assignee.get("_id")),
+        "assignedToRole": assignee.get("role"),
+
+        "attachments": uploaded_files,
+        "comments": [],
+
+        "createdAt": now(),
+        "updatedAt": now()
+    }
+
+    res = await ticketsCol.insert_one(ticketDoc)
+    ticketId = str(res.inserted_id)
+
+    # email notify assignee
+    send_ticket_email(
+        assignee["email"],
+        f"New Ticket Assigned - #{ticketId}",
+        f"You have been assigned a ticket.\n\nTitle: {title}\n\nDescription:\n{description}"
+    )
+
+    await logActivity(user, "Ticket Created", f"Created ticket #{ticketId}", "Success")
+
+    return {"message": "Ticket created", "ticketId": ticketId}
+
+## access your tickets
+@app.get("/secure/tickets/my")
+async def getMyTickets(user: dict = Depends(requireAuth)):
+    cursor = ticketsCol.find({"createdBy": user.get("email")}).sort("createdAt", -1)
+    data = await cursor.to_list(None)
+
+    for t in data:
+        t["_id"] = str(t["_id"])
+
+    return {"tickets": data}
+
+
+@app.get("/secure/tickets/org")
+async def getOrgTickets(user: dict = Depends(requireAuth)):
+    """Get all the tickets over the org"""
+    orgId = str(user.get("organizationId"))
+
+    cursor = ticketsCol.find({"organizationId": orgId}).sort("createdAt", -1)
+    data = await cursor.to_list(None)
+
+    for t in data:
+        t["_id"] = str(t["_id"])
+
+    return {"tickets": data}
+
+
+@app.get("/secure/tickets/all")
+async def getAllTickets(user: dict = Depends(requireAuth)):
+    """Get all the tickets over the allorg"""
+    if user.get("role") not in ["SUPER_ADMIN", "SUPER_SPOC"]:
+        raise HTTPException(403, "Not authorized")
+
+    cursor = ticketsCol.find({}).sort("createdAt", -1)
+    data = await cursor.to_list(None)
+
+    for t in data:
+        t["_id"] = str(t["_id"])
+
+    return {"tickets": data}
+
+
+@app.post("/secure/tickets/{ticketId}/comment")
+async def addComment(ticketId: str, body: dict = Body(...), user: dict = Depends(requireAuth)):
+    message = body.get("message")
+    if not message:
+        raise HTTPException(400, "Comment cannot be empty")
+
+    ticket = await ticketsCol.find_one({"_id": ObjectId(ticketId)})
+    if not ticket:
+        raise HTTPException(404, "Ticket not found")
+
+    comment = {
+        "commentBy": user.get("email"),
+        "commentByRole": user.get("role"),
+        "message": message,
+        "timestamp": now(),
+        "attachments": []
+    }
+
+    await ticketsCol.update_one(
+        {"_id": ObjectId(ticketId)},
+        {"$push": {"comments": comment}, "$set": {"updatedAt": now()}}
+    )
+
+    send_ticket_email(
+        ticket["assignedTo"],
+        f"New Comment on Ticket #{ticketId}",
+        f"{user.get('email')} commented:\n\n{message}"
+    )
+
+    await logActivity(user, "Ticket Comment Added", f"Commented on ticket #{ticketId}", "Success")
+
+    return {"message": "Comment added"}
+
+@app.post("/secure/tickets/{ticketId}/status")
+async def updateStatus(ticketId: str, body: dict = Body(...), user: dict = Depends(requireAuth)):
+    newStatus = body.get("status")
+
+    if newStatus not in ["OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED", "REOPENED"]:
+        raise HTTPException(400, "Invalid status")
+
+    ticket = await ticketsCol.find_one({"_id": ObjectId(ticketId)})
+    if not ticket:
+        raise HTTPException(404, "Ticket not found")
+
+    role = user.get("role")
+
+    if role == "HELPER":
+        raise HTTPException(403, "HELPER cannot change status")
+
+    await ticketsCol.update_one(
+        {"_id": ObjectId(ticketId)},
+        {"$set": {"status": newStatus, "updatedAt": now()}}
+    )
+
+    send_ticket_email(
+        ticket["createdBy"],
+        f"Ticket #{ticketId} Status Updated",
+        f"Status changed to {newStatus}"
+    )
+
+    await logActivity(user, "Ticket Status Updated", f"#{ticketId} → {newStatus}", "Success")
+
+    return {"message": "Status updated"}
+
+
+@app.post("/secure/tickets/{ticketId}/assign")
+async def assignTicket(ticketId: str, body: dict = Body(...), user: dict = Depends(requireAuth)):
+    # Allowed roles
+    if user.get("role") not in ["SPOC", "ORG_HR", "SUPER_ADMIN", "SUPER_SPOC"]:
+        raise HTTPException(403, "Not authorized")
+
+    # Fetch ticket
+    ticket = await ticketsCol.find_one({"_id": ObjectId(ticketId)})
+    if not ticket:
+        raise HTTPException(404, "Ticket not found")
+
+    ticketOrgId = str(ticket.get("organizationId"))
+
+    newAssigneeEmail = body.get("assignee")
+    if not newAssigneeEmail:
+        raise HTTPException(400, "Assignee email is required")
+
+    # Fetch new assignee
+    assignee = await usersCol.find_one({"email": newAssigneeEmail})
+    if not assignee:
+        raise HTTPException(404, "User not found")
+
+    # 🔥 CHECK ORG MATCH — IMPORTANT
+    if str(assignee.get("organizationId")) != ticketOrgId:
+        raise HTTPException(403, "Cannot assign ticket outside the organization")
+
+    # Update ticket
+    await ticketsCol.update_one(
+        {"_id": ObjectId(ticketId)},
+        {
+            "$set": {
+                "assignedTo": assignee["email"],
+                "assignedToId": str(assignee["_id"]),
+                "assignedToRole": assignee["role"],
+                "updatedAt": now()
+            }
+        }
+    )
+
+    # Email notification
+    send_ticket_email(
+        assignee["email"],
+        f"You have been assigned Ticket #{ticketId}",
+        f"You have been assigned a new ticket. Please check your dashboard."
+    )
+
+    await logActivity(
+        user,
+        "Ticket Reassigned",
+        f"Ticket #{ticketId} assigned to {assignee['email']}",
+        "Success"
+    )
+
+    return {"message": "Ticket assigned"}
