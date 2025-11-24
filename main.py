@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from bson import ObjectId
 from fastapi import UploadFile, File, Form, Depends, HTTPException
 from utils.ai_utils import generate_resume_embeddings_and_rank
+from utils.email_utils import *
 
 # -------------------------------
 # Config
@@ -91,19 +92,19 @@ def toStrId(doc):
         d["_id"] = str(d["_id"])
     return d
 
-async def logActivity(user: dict, action: str, details: str, status: str = "Success"):
-    logDoc = {
-        "userId": str(user.get("_id")) if user.get("_id") else None,
-        "userName": user.get("userName"),
-        "email": user.get("email"),
-        "role": user.get("role"),
-        "organizationId": user.get("organizationId"),
-        "action": action,
-        "details": details,
-        "status": status,
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
-    await activityLogsCol.insert_one(logDoc)
+async def logActivity(user, action, description, status):
+    # Handle self-verification (no user object)
+    if user is None:
+        userId = None
+        userEmail = "self-verification"
+        userRole = "SELF"
+        orgId = None
+    else:
+        userId = str(user.get("_id")) if user.get("_id") else None
+        userEmail = user.get("email")
+        userRole = user.get("role")
+        orgId = str(user.get("organizationId")) if user.get("organizationId") else None
+
 
 
 # -------------------------------
@@ -1014,7 +1015,7 @@ async def getUsers(request: Request, organizationId: Optional[str] = Query(None)
     Rules (based on role hierarchy):
         - SUPER_ADMIN → all users across all orgs
         - BGV SPOC (global SPOC) → same as SUPER_ADMIN (full access)
-        - ORG_SPOC → only own org
+        - SPOC → only own org
         - SUPER_ADMIN_HELPER → only users from accessibleOrganizations (or filter by org within that list)
         - ORG_HR → only own org
         - HELPER / EMPLOYEE → forbidden
@@ -1395,7 +1396,7 @@ async def getVerifications(
     - SUPER_ADMIN: all verifications
     - GLOBAL_SPOC (bgvapp.in/bgvl): all verifications
     - SUPER_ADMIN_HELPER: only assigned organizations
-    - ORG_SPOC / ORG_HR: only their own organization
+    - SPOC / ORG_HR: only their own organization
     - HELPER: only those initiated by themselves
     - EMPLOYEE / CANDIDATE: forbidden
     """
@@ -1434,7 +1435,7 @@ async def getVerifications(
             raise HTTPException(status_code=403, detail="No organizations assigned")
         query["organizationId"] = {"$in": accessibleOrgs}
 
-    elif role in ["ORG_SPOC", "ORG_HR"]:
+    elif role in ["SPOC", "ORG_HR"]:
         if not userOrgId:
             raise HTTPException(status_code=400, detail="Organization ID missing")
         query["organizationId"] = userOrgId
@@ -1557,7 +1558,7 @@ async def getCandidates(
     Rules:
       - SUPER_ADMIN and BGV SPOC (email ends with @bgv.local) → access ALL candidates
       - SUPER_ADMIN_HELPER → candidates from orgs in accessibleOrganizations
-      - ORG_SPOC or ORG_HR → candidates only from their own org (organizationId)
+      - SPOC or ORG_HR → candidates only from their own org (organizationId)
       - HELPER → only candidates created by them (createdBy = their email)
     """
 
@@ -1590,7 +1591,7 @@ async def getCandidates(
         else:
             query["organizationId"] = {"$in": accessibleOrgs}
 
-    # 🔹 ORG_SPOC or ORG_HR → only their org
+    # 🔹 SPOC or ORG_HR → only their org
     elif role in ["SPOC", "ORG_HR"]:
         if not userOrgId:
             raise HTTPException(status_code=400, detail="Organization ID missing in profile")
@@ -1701,7 +1702,7 @@ async def modifyCandidate(body: dict = Body(...), user: dict = Depends(requireAu
         if organizationId in accessible:
             allowed = True
 
-    # 4. ORG_HR / ORG_SPOC → only inside their org
+    # 4. ORG_HR / SPOC → only inside their org
     elif role in ["ORG_HR", "SPOC"]:
         if organizationId == userOrgId:
             allowed = True
@@ -1876,7 +1877,7 @@ async def initiateStageVerification(body: dict = Body(...), user: dict = Depends
         if requestedOrgId not in accessible:
             raise HTTPException(status_code=403, detail="Not authorized for this organization")
 
-    # ORG_SPOC / ORG_HR → only their org
+    # SPOC / ORG_HR → only their org
     elif role in ["ORG_HR", "SPOC"]:
         if requestedOrgId != userOrgId:
             raise HTTPException(status_code=403, detail="Not authorized for this organization")
@@ -2169,6 +2170,13 @@ async def runStage(body: dict = Body(...), user: dict = Depends(requireAuth)):
         # RUN actual verification (your real API)
         # -----------------------------------------
         status, remarks = await run_verification(checkName, candidate)
+        # LOG THE VERIFICATION CALL HERE
+        await logActivity(
+            user,
+            "Verification Check Executed",
+            f"Check: {checkName} | Stage: {stage} | Status: {status} | Remarks: {remarks}",
+            "Success" if status == "COMPLETED" else "Failed"
+        )
 
         # =========================================
         # 🟥 NEW: MISSING DATA → FAIL BUT SAFE
@@ -2279,11 +2287,6 @@ async def runStage(body: dict = Body(...), user: dict = Depends(requireAuth)):
 
 @app.post("/secure/retryCheck")
 async def retryCheck(body: dict = Body(...), user: dict = Depends(requireAuth)):
-    """
-    Retry a single FAILED check.
-    SKIPPED (missing data) is treated SAME AS FAILED.
-    If retry fails again -> stage remains FAILED and cannot move to next stage.
-    """
 
     verificationId = body.get("verificationId")
     stage = body.get("stage")
@@ -2305,9 +2308,9 @@ async def retryCheck(body: dict = Body(...), user: dict = Depends(requireAuth)):
     if stageChecks is None:
         raise HTTPException(status_code=404, detail="Stage not found")
 
-    # -------------------------------
-    # Locate check index
-    # -------------------------------
+    # --------------------------------------
+    # Locate Check Index
+    # --------------------------------------
     idx = None
     for i, ch in enumerate(stageChecks):
         if ch.get("check") == checkKey:
@@ -2319,16 +2322,15 @@ async def retryCheck(body: dict = Body(...), user: dict = Depends(requireAuth)):
 
     currentStatus = stageChecks[idx].get("status", "NOT_STARTED").upper()
 
-    # Only allow retry when FAILED
     if currentStatus != "FAILED":
         return JSONResponse(status_code=400, content={
             "message": "Check is not in FAILED state and cannot be retried",
             "currentStatus": currentStatus
         })
 
-    # -------------------------------
-    # ROLE VALIDATION (unchanged)
-    # -------------------------------
+    # --------------------------------------
+    # ROLE VALIDATION
+    # --------------------------------------
     verificationOrgId = str(ver.get("organizationId", ""))
     userEmail = user.get("email", "").lower().strip()
     accessibleOrgs = [str(x) for x in user.get("accessibleOrganizations", [])]
@@ -2345,14 +2347,14 @@ async def retryCheck(body: dict = Body(...), user: dict = Depends(requireAuth)):
         if verificationOrgId != str(user.get("organizationId")):
             raise HTTPException(status_code=403, detail="You can only retry checks in your organization")
     elif role == "HELPER":
-        if ver.get("initiatedBy","").lower().strip() != userEmail:
-            raise HTTPException(status_code=403, detail="You can only retry checks for verifications you initiated")
+        if ver.get("initiatedBy", "").lower().strip() != userEmail:
+            raise HTTPException(status_code=403, detail="You can only retry checks you initiated")
     else:
         raise HTTPException(status_code=403, detail="Not authorized to retry checks")
 
-    # -------------------------------
+    # --------------------------------------
     # Mark IN_PROGRESS
-    # -------------------------------
+    # --------------------------------------
     await verificationsCol.update_one(
         {"_id": verObjId},
         {"$set": {
@@ -2361,26 +2363,35 @@ async def retryCheck(body: dict = Body(...), user: dict = Depends(requireAuth)):
         }}
     )
 
-    # -------------------------------
-    # Run verification again
-    # -------------------------------
+    # --------------------------------------
+    # Run Verification
+    # --------------------------------------
     candidate = await candidatesCol.find_one({"_id": ObjectId(ver["candidateId"])})
 
     try:
         status, remarks = await run_verification(checkKey, candidate)
+
+        # 🔥 ADDING LOG
+        await logActivity(
+            user,
+            "Retry Check Executed",
+            f"Check: {checkKey} | Stage: {stage} | Result: {status} | Remarks: {remarks}",
+            "Success" if status == "COMPLETED" else "Failed"
+        )
+
     except Exception as e:
         status, remarks = "FAILED", f"Runtime error: {str(e)}"
 
-    # ========================================================
-    # 🟥 NEW: SKIPPED BEHAVES LIKE FAILED
-    # ========================================================
-    if status == "SKIPPED":
-        status = "FAILED"
-        remarks = f"Missing required data: {remarks}"
+        await logActivity(
+            user,
+            "Retry Check Error",
+            f"Check: {checkKey} | Stage: {stage} | Error: {e}",
+            "Error"
+        )
 
-    # -------------------------------
+    # --------------------------------------
     # Update check result
-    # -------------------------------
+    # --------------------------------------
     await verificationsCol.update_one(
         {"_id": verObjId},
         {"$set": {
@@ -2391,11 +2402,17 @@ async def retryCheck(body: dict = Body(...), user: dict = Depends(requireAuth)):
     )
 
     # ========================================================
-    # ❌ FAILED AGAIN → STOP EVERYTHING
+    # SKIPPED = FAILED
+    # ========================================================
+    if status == "SKIPPED":
+        status = "FAILED"
+        remarks = f"Missing data: {remarks}"
+
+    # ========================================================
+    # FAILED AGAIN → STOP
     # ========================================================
     if status == "FAILED":
 
-        # Keep stage blocked
         await verificationsCol.update_one(
             {"_id": verObjId},
             {"$set": {
@@ -2404,23 +2421,21 @@ async def retryCheck(body: dict = Body(...), user: dict = Depends(requireAuth)):
             }}
         )
 
-        # Candidate remains failed-at-check
         await candidatesCol.update_one(
             {"_id": ObjectId(ver["candidateId"])},
             {"$set": {"status": f"FAILED_AT_{stage}_{checkKey}"}}
         )
 
-        return JSONResponse(status_code=200, content={
+        return {
             "check": checkKey,
             "status": "FAILED",
             "remarks": remarks,
             "canProceed": False
-        })
+        }
 
     # ========================================================
-    # ✔ SUCCESS PATH
+    # SUCCESS PATH
     # ========================================================
-    # Clear failure state
     await verificationsCol.update_one(
         {"_id": verObjId},
         {"$set": {
@@ -2429,16 +2444,13 @@ async def retryCheck(body: dict = Body(...), user: dict = Depends(requireAuth)):
         }}
     )
 
-    # Check if stage now 100% COMPLETED
     verLatest = await verificationsCol.find_one({"_id": verObjId})
     stageAll = verLatest.get("stages", {}).get(stage, [])
 
     stageDone = len(stageAll) > 0 and all(ch.get("status") == "COMPLETED" for ch in stageAll)
 
-    # If stage completed
     if stageDone:
 
-        # FINAL stage
         if stage == "final":
             await verificationsCol.update_one(
                 {"_id": verObjId},
@@ -2448,19 +2460,19 @@ async def retryCheck(body: dict = Body(...), user: dict = Depends(requireAuth)):
                     "failureStage": None
                 }}
             )
+
             await candidatesCol.update_one(
                 {"_id": ObjectId(ver["candidateId"])},
                 {"$set": {"status": "VERIFIED"}}
             )
 
-            return JSONResponse(status_code=200, content={
+            return {
                 "check": checkKey,
                 "status": "COMPLETED",
                 "finalStageCompleted": True,
                 "canProceed": True
-            })
+            }
 
-        # NON-FINAL stage
         await verificationsCol.update_one(
             {"_id": verObjId},
             {"$set": {
@@ -2470,20 +2482,19 @@ async def retryCheck(body: dict = Body(...), user: dict = Depends(requireAuth)):
             }}
         )
 
-        return JSONResponse(status_code=200, content={
+        return {
             "check": checkKey,
             "status": "COMPLETED",
             "stageCompleted": True,
             "canProceed": True
-        })
+        }
 
-    # Check succeeded but stage not completed yet
-    return JSONResponse(status_code=200, content={
+    return {
         "check": checkKey,
         "status": status,
         "remarks": remarks,
         "canProceed": False
-    })
+    }
 
 from fastapi import APIRouter, Body, HTTPException, Depends, Form, UploadFile, File
 from datetime import datetime, timedelta, timezone
@@ -2523,9 +2534,16 @@ async def initiateStage(
     organizationId = body.get("organizationId")
     checks = body.get("checks", [])
 
-    # ---------------------------------------------------------
-    # 🟩 FIX: Local buildChecks JUST for Self verification
-    # ---------------------------------------------------------
+    # -------------------------------------------
+    # LOG: START
+    # -------------------------------------------
+    await logActivity(
+        user,
+        "Initiate Stage",
+        f"Attempting to initiate stage '{stage}' for candidate {candidateId}",
+        "Success"
+    )
+
     def buildChecks(chkList):
         return [{
             "check": c,
@@ -2536,9 +2554,6 @@ async def initiateStage(
             "metadata": None
         } for c in chkList]
 
-    # ---------------------------------------------
-    # RULES
-    # ---------------------------------------------
     if len(checks) != len(set(checks)):
         raise HTTPException(400, "Duplicate checks found")
 
@@ -2568,9 +2583,6 @@ async def initiateStage(
         "organizationId": organizationId
     })
 
-    # ----------------------------------------------------------
-    # BLOCK duplicate or conflicting initialization
-    # ----------------------------------------------------------
     if ver:
         if ver.get("overallStatus") in ["COMPLETED", "FAILED"]:
             raise HTTPException(400, "Verification already closed for this candidate")
@@ -2585,7 +2597,6 @@ async def initiateStage(
                 raise HTTPException(400, f"Cannot start {stage}, {activeStage} not completed")
 
     else:
-        # Create new verification doc
         verDoc = {
             "candidateId": candidateId,
             "candidateName": f"{candidate.get('firstName','')} {candidate.get('lastName','')}".strip(),
@@ -2614,9 +2625,6 @@ async def initiateStage(
 
     verId = ver["_id"]
 
-    # ----------------------------
-    # PREVENT DUPLICATE ACROSS STAGES
-    # ----------------------------
     used = set()
     for stageName, stageList in ver["stages"].items():
         for c in stageList:
@@ -2626,9 +2634,6 @@ async def initiateStage(
         if c in used:
             raise HTTPException(400, f"Check '{c}' already used in previous stage")
 
-    # ----------------------------
-    # BUILD CHECKS (ONLY PASSED)
-    # ----------------------------
     newChecks = buildChecks(checks)
 
     token = str(uuid.uuid4())
@@ -2648,7 +2653,16 @@ async def initiateStage(
         }
     )
 
-    # Send email
+    # -------------------------------------------
+    # LOG: STAGE INITIALIZED
+    # -------------------------------------------
+    await logActivity(
+        user,
+        "Stage Initialized",
+        f"Stage '{stage}' initialized for candidate {candidateId} | Checks: {checks}",
+        "Success"
+    )
+
     candidateEmail = candidate.get("email")
     if not candidateEmail:
         raise HTTPException(400, "Invalid candidate email")
@@ -2662,8 +2676,17 @@ async def initiateStage(
         expiresAt=expiresAt
     )
 
-    return {"message": f"{stage} stage initiated", "token": token}
+    # -------------------------------------------
+    # LOG: EMAIL SENT
+    # -------------------------------------------
+    await logActivity(
+        user,
+        "Self Verification Email Sent",
+        f"Email sent to {candidateEmail} for stage '{stage}' with token {token}",
+        "Success"
+    )
 
+    return {"message": f"{stage} stage initiated", "token": token}
 
 # ---------------------------------------------------------
 # 2) CANDIDATE OPENS THE STAGE
@@ -2736,6 +2759,16 @@ async def submitCheck(
         if stageList[i]["status"] != "COMPLETED":
             raise HTTPException(status_code=400, detail="Previous checks not completed")
 
+    # ------------------------------
+    # LOG: Check execution started
+    # ------------------------------
+    await logActivity(
+        None,
+        "Self Verification Check Started",
+        f"VerificationId={verificationId}, Stage={stage}, Check={check}",
+        "Started"
+    )
+
     # Run the actual check
     candidate = await candidatesCol.find_one({"_id": ObjectId(ver["candidateId"])})
 
@@ -2757,6 +2790,16 @@ async def submitCheck(
             f"stages.{stage}.{idx}.submittedAt": get_current_time(),
             f"stages.{stage}.{idx}.metadata": metadata
         }}
+    )
+
+    # ------------------------------
+    # LOG: Check completed
+    # ------------------------------
+    await logActivity(
+        None,
+        "Self Verification Check Completed",
+        f"VerificationId={verificationId}, Stage={stage}, Check={check}, Status={status}, Remarks={remarks}",
+        "Success" if status == "COMPLETED" else "Failed"
     )
 
     # FAILURE path
@@ -2789,6 +2832,16 @@ async def submitCheck(
         await verificationsCol.update_one(
             {"_id": verObjId},
             {"$unset": {f"stages.{stage}Status": ""}}
+        )
+
+        # ------------------------------
+        # LOG: Stage completed
+        # ------------------------------
+        await logActivity(
+            None,
+            "Self Verification Stage Completed",
+            f"VerificationId={verificationId}, Stage={stage}",
+            "Success"
         )
 
         # FINAL stage fully complete
@@ -2843,10 +2896,27 @@ async def retryCheck(
 
     try:
         status, remarks = await run_verification(check, candidate)
+
+        # 🟦 LOG SUCCESSFUL / FAILED API CALL BEFORE SKIPPED HANDLING
+        await logActivity(
+            None,
+            "Self Verification Retry Check Executed",
+            f"Check: {check} | Stage: {stage} | Status: {status} | Remarks: {remarks}",
+            "Success" if status == "COMPLETED" else "Failed"
+        )
+
     except:
         status, remarks = ("FAILED", "Runtime error")
 
-    # 🟦 NEW: SKIPPED behaves like FAILED
+        # 🟥 LOG RUNTIME FAILURE
+        await logActivity(
+            None,
+            "Self Verification Retry Check Error",
+            f"Check: {check} | Stage: {stage} | Error: {remarks}",
+            "Failed"
+        )
+
+    # 🟦 SKIPPED behaves like FAILED
     if status == "SKIPPED":
         status = "FAILED"
         remarks = f"Missing required data: {remarks}"
@@ -2871,7 +2941,7 @@ async def retryCheck(
             {
                 "$set": {
                     "overallStatus": "FAILED",
-                    "failureStage": f"{stage}_{check}"   # 🟦 NEW
+                    "failureStage": f"{stage}_{check}"
                 }
             }
         )
@@ -2940,82 +3010,82 @@ async def status(verificationId: str):
     }
 
 
-from apis import process_verification_record
-from bson import ObjectId
+# from apis import process_verification_record
+# from bson import ObjectId
 
-@app.post("/secure/resumePendingVerifications")
-async def resumePendingVerifications(user: dict = Depends(requireAuth)):
-    """
-    Resume pending or in-progress verifications.
-    Rules:
-      - SUPER_ADMIN → can resume all.
-      - SUPER_ADMIN_HELPER → can resume only from accessible organizations.
-      - Others → forbidden.
-    """
-    role = user.get("role")
-    accessibleOrgs = [str(x) for x in user.get("accessibleOrganizations", [])]
+# @app.post("/secure/resumePendingVerifications")
+# async def resumePendingVerifications(user: dict = Depends(requireAuth)):
+#     """
+#     Resume pending or in-progress verifications.
+#     Rules:
+#       - SUPER_ADMIN → can resume all.
+#       - SUPER_ADMIN_HELPER → can resume only from accessible organizations.
+#       - Others → forbidden.
+#     """
+#     role = user.get("role")
+#     accessibleOrgs = [str(x) for x in user.get("accessibleOrganizations", [])]
 
-    # ------------------------------
-    # 🔒 Role-based Access Control
-    # ------------------------------
-    if role not in ["SUPER_ADMIN", "SUPER_ADMIN_HELPER", "SUPER_SPOC"]:
-        raise HTTPException(status_code=403, detail="Not authorized to resume verifications")
+#     # ------------------------------
+#     # 🔒 Role-based Access Control
+#     # ------------------------------
+#     if role not in ["SUPER_ADMIN", "SUPER_ADMIN_HELPER", "SUPER_SPOC"]:
+#         raise HTTPException(status_code=403, detail="Not authorized to resume verifications")
 
-    # ------------------------------
-    # 🎯 Build Query Based on Role
-    # ------------------------------
-    query = {"overallStatus": {"$in": ["IN_PROGRESS", "PENDING"]}}
+#     # ------------------------------
+#     # 🎯 Build Query Based on Role
+#     # ------------------------------
+#     query = {"overallStatus": {"$in": ["IN_PROGRESS", "PENDING"]}}
 
-    if role == "SUPER_ADMIN_HELPER":
-        if not accessibleOrgs:
-            raise HTTPException(status_code=403, detail="No organizations assigned to helper")
-        query["organizationId"] = {"$in": accessibleOrgs}
+#     if role == "SUPER_ADMIN_HELPER":
+#         if not accessibleOrgs:
+#             raise HTTPException(status_code=403, detail="No organizations assigned to helper")
+#         query["organizationId"] = {"$in": accessibleOrgs}
 
-    # ------------------------------
-    # 🔄 Resume Matching Verifications
-    # ------------------------------
-    pending_cursor = verificationsCol.find(query)
-    count = 0
+#     # ------------------------------
+#     # 🔄 Resume Matching Verifications
+#     # ------------------------------
+#     pending_cursor = verificationsCol.find(query)
+#     count = 0
 
-    async for verification in pending_cursor:
-        try:
-            # Verify candidate still exists
-            candidate = await candidatesCol.find_one({"_id": ObjectId(verification["candidateId"])})
-            if not candidate:
-                continue
+#     async for verification in pending_cursor:
+#         try:
+#             # Verify candidate still exists
+#             candidate = await candidatesCol.find_one({"_id": ObjectId(verification["candidateId"])})
+#             if not candidate:
+#                 continue
 
-            # Relaunch background verification task
-            asyncio.create_task(process_verification_record(verification))
-            count += 1
+#             # Relaunch background verification task
+#             asyncio.create_task(process_verification_record(verification))
+#             count += 1
 
-        except Exception as e:
-            await logActivity(
-                user,
-                "Resume Verification Failed",
-                f"Error resuming verification {verification.get('_id')}: {str(e)}",
-                "Error"
-            )
+#         except Exception as e:
+#             await logActivity(
+#                 user,
+#                 "Resume Verification Failed",
+#                 f"Error resuming verification {verification.get('_id')}: {str(e)}",
+#                 "Error"
+#             )
 
-    # ------------------------------
-    # ✅ Response + Activity Log
-    # ------------------------------
-    if count == 0:
-        await logActivity(
-            user,
-            "Resume Verifications",
-            f"No pending verifications found for {role}",
-            "Info"
-        )
-        return {"message": "No pending verifications found"}
+#     # ------------------------------
+#     # ✅ Response + Activity Log
+#     # ------------------------------
+#     if count == 0:
+#         await logActivity(
+#             user,
+#             "Resume Verifications",
+#             f"No pending verifications found for {role}",
+#             "Info"
+#         )
+#         return {"message": "No pending verifications found"}
 
-    await logActivity(
-        user,
-        "Resume Verifications",
-        f"{role} resumed {count} verifications",
-        "Success"
-    )
+#     await logActivity(
+#         user,
+#         "Resume Verifications",
+#         f"{role} resumed {count} verifications",
+#         "Success"
+#     )
 
-    return {"message": f"Resumed {count} pending verifications"}
+#     return {"message": f"Resumed {count} pending verifications"}
 
 # ============================================================
 #                SELF VERIFICATION MODULE (V2)
@@ -3561,7 +3631,7 @@ async def addCandidate(body: dict = Body(...), user: dict = Depends(requireAuth)
         orgId = inputOrgId
         orgName = org.get("organizationName")
 
-    elif role in ["ORG_HR", "ORG_SPOC"]:
+    elif role in ["ORG_HR", "SPOC"]:
         orgId = user.get("organizationId")
         if not orgId:
             raise HTTPException(status_code=400, detail="Organization ID missing for HR/SPOC")
@@ -3734,12 +3804,16 @@ async def getRecentImportantActivity(
 
     IMPORTANT_LOG_TYPES = [
         "Add Candidate",
+        "Self Verification Email Sent",
+        "Verification Check Executed",
         "New Verification Initiated",
         "Add User",
         "Add Organization",
         "Update Verification Status",
         "Unauthorized Attempt",
         "Error",
+        "Add Candidate",
+        "Stage Initialized",
         "Login",
         "Logout",
         "Password Reset Failed",
@@ -3846,6 +3920,24 @@ async def getRecentImportantActivity(
         })
     )
 
+def validatePassword(pw: str) -> bool:
+    """
+    Password must be at least:
+    - 8 characters
+    - 1 uppercase letter
+    - 1 number
+    - 1 special character
+    """
+    import re
+    if len(pw) < 8:
+        return False
+    if not re.search(r"[A-Z]", pw):
+        return False
+    if not re.search(r"[0-9]", pw):
+        return False
+    if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", pw):
+        return False
+    return True
 
 @app.post("/auth/resetPassword")
 async def resetPassword(
@@ -3853,11 +3945,11 @@ async def resetPassword(
     authUser: dict = Depends(requireAuth)  # logged-in user
 ):
     email = body.get("email", "").lower().strip()
-    phone = body.get("phone", "").strip()
+    # phone = body.get("phone", "").strip()
     currentPassword = body.get("currentPassword", "").strip()
     newPassword = body.get("newPassword", "").strip()
 
-    if not email or not phone or not currentPassword or not newPassword:
+    if not email or not currentPassword or not newPassword:
         await logActivity(
             authUser,
             "Password Reset Failed",
@@ -3893,15 +3985,15 @@ async def resetPassword(
         raise HTTPException(status_code=404, detail="User not found")
 
     # Phone match (phone or phoneNumber)
-    storedPhone = user.get("phone") or user.get("phoneNumber")
-    if not storedPhone or str(storedPhone).strip() != str(phone).strip():
-        await logActivity(
-            authUser,
-            "Password Reset Failed",
-            "Phone number does not match",
-            "Error"
-        )
-        raise HTTPException(status_code=400, detail="Phone number does not match")
+    # storedPhone = user.get("phone") or user.get("phoneNumber")
+    # if not storedPhone or str(storedPhone).strip() != str(phone).strip():
+    #     await logActivity(
+    #         authUser,
+    #         "Password Reset Failed",
+    #         "Phone number does not match",
+    #         "Error"
+    #     )
+    #     raise HTTPException(status_code=400, detail="Phone number does not match")
 
     # Current password match
     if user.get("password") != currentPassword:
@@ -4027,14 +4119,18 @@ async def ai_resume_selection(
     if len(resumes) > 100:
         raise HTTPException(status_code=400, detail="Maximum 100 resumes allowed")
 
-    # NEW PIPELINE → Extract → Structure → Embedding → Score → Top 5
-    topFive, pipelineRunId = await generate_resume_embeddings_and_rank(resumes, jd)
+    # FIXED CALL (correct order)
+    topFive, pipelineRunId = await generate_resume_embeddings_and_rank(
+        resumes,
+        jd
+    )
 
     return {
         "message": "AI Resume Selection Completed",
         "pipelineRunId": pipelineRunId,
         "topFiveResumes": topFive
     }
+
 
 
 # =================================================================
@@ -4056,7 +4152,7 @@ async def verify_certificate_access(user: dict, meta: dict):
         return candidateOrgId in accessibleOrgs
 
     # ORG HR / ORG SPOC — only own org
-    if role in ["ORG_HR", "ORG_SPOC"]:
+    if role in ["ORG_HR", "SPOC"]:
         return candidateOrgId == str(userOrgId)
 
     # HELPER — only candidates they added
