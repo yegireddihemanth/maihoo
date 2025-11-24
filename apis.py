@@ -3,7 +3,7 @@ import aiohttp
 from datetime import datetime, timezone
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
-
+from utils.ai_utils import *
 # ---------------------------------------------------
 # 📌 Surepass Dummy Credentials (REPLACE THEM)
 # ---------------------------------------------------
@@ -22,6 +22,68 @@ db = client[mongoDbName]
 verificationsCol = db["verifications"]
 candidatesCol = db["candidates"]
 activityLogsCol = db["activityLogs"]   # <-- REQUIRED FOR LOGGING
+
+# ---------------------------------------------------
+# 📌 Resume Validation Check  (FULL – NO REMOVALS)
+# ---------------------------------------------------
+# ---------------------------------------------------
+# RESUME VALIDATION CHECK (uses your ollama model)
+# ---------------------------------------------------
+async def verify_resume_validation(candidate: dict):
+    """
+    1. Loads resume file path from candidate.resumePath  
+    2. Extracts text using ai_utils extractors  
+    3. Sends extracted resume text to LLaMA validator  
+    4. Returns COMPLETED or FAILED  
+    """
+
+    from utils.ai_utils import extract_text_from_pdf, extract_text_from_docx, llm_resume_validator
+
+    resumePath = candidate.get("resumePath")
+    if not resumePath:
+        return "FAILED", "Resume not uploaded"
+
+    ext = resumePath.split(".")[-1].lower()
+
+    try:
+        # -----------------------------------
+        # Extract resume text
+        # -----------------------------------
+        if ext == "pdf":
+            extractedText = extract_text_from_pdf(resumePath)
+        elif ext == "docx":
+            extractedText = extract_text_from_docx(resumePath)
+        else:
+            return "FAILED", f"Unsupported file type: {ext}"
+
+        if not extractedText or len(extractedText.strip()) < 20:
+            return "FAILED", "Could not extract any meaningful text"
+
+        # -----------------------------------
+        # Validate resume using LLaMA
+        # -----------------------------------
+        validation = await llm_resume_validator(extractedText)
+
+        # validation = {
+        #     "status": "VALID" | "INVALID",
+        #     "issues": [...],
+        #     "explanation": "..."
+        # }
+
+        if validation.get("status") == "VALID":
+            return "COMPLETED", {
+                "message": "Resume validation passed",
+                "details": validation
+            }
+
+        else:
+            return "FAILED", {
+                "message": "Resume validation failed",
+                "details": validation
+            }
+
+    except Exception as e:
+        return "FAILED", f"Resume validation error: {str(e)}"
 
 
 # ---------------------------------------------------
@@ -43,14 +105,15 @@ async def post_json(url: str, headers: dict, payload: dict):
 
 
 # ---------------------------------------------------
-# 📌 Verification Functions (REAL CALLS)
+# 📌 Verification Functions (FULL CODE — ONLY FIXED PAN/AADHAAR)
 # ---------------------------------------------------
-# (UNCHANGED)
-# ---------------------------------------------------
-async def verify_pan_aadhaar_seeding(aadhaar_number: str):
+async def verify_pan_aadhaar_seeding(pan_number: str, aadhaar_number: str):
     url = "https://kyc-api.surepass.io/api/v1/pan/aadhaar-pan-link-check"
     headers = {"Authorization": f"Bearer {SUREPASS_TOKEN}", "Content-Type": "application/json"}
-    payload = {"aadhaar_number": aadhaar_number}
+    payload = {
+        "pan_number": pan_number,
+        "aadhaar_number": aadhaar_number
+    }
     return await post_json(url, headers, payload)
 
 async def verify_pan(pan_number: str):
@@ -95,17 +158,20 @@ async def verify_court_record(candidate: dict):
     }
     return await post_json(url, headers, payload)
 
+
 # ---------------------------------------------------
-# 📌 Dispatcher (UNCHANGED)
+# 📌 Dispatcher (FULL — ONLY FIXED pan_aadhaar)
 # ---------------------------------------------------
 def validate_fields(check_type, candidate):
     required = {
-        "pan_aadhaar_seeding": ["aadhaarNumber"],
+        "pan_aadhaar_seeding": ["aadhaarNumber", "panNumber"],
         "pan_verification": ["panNumber"],
         "employment_history": ["uanNumber"],
         "verify_pan_to_uan": ["panNumber"],
         "credit_report": ["phone", "panNumber", "firstName", "lastName"],
-        "court_record": ["firstName", "lastName", "address"]
+        "court_record": ["firstName", "lastName", "address"],
+        "resume_validation": ["resumePath"]  # resume must already be uploaded
+
     }
 
     fields = required.get(check_type, [])
@@ -123,7 +189,10 @@ async def run_verification(check_type: str, candidate: dict):
         return "SKIPPED", f"Missing required field: {missing_field}"
 
     if check_type == "pan_aadhaar_seeding":
-        return await verify_pan_aadhaar_seeding(candidate.get("pan"))
+        return await verify_pan_aadhaar_seeding(
+            candidate.get("panNumber"),
+            candidate.get("aadhaarNumber")
+        )
 
     if check_type == "pan_verification":
         return await verify_pan(candidate.get("panNumber"))
@@ -139,12 +208,19 @@ async def run_verification(check_type: str, candidate: dict):
 
     if check_type == "court_record":
         return await verify_court_record(candidate)
+    
+    if check_type == "resume_validation":
+        return await verify_resume_validation(candidate)
+
+
+
 
     return "FAILED", f"Unknown check type: {check_type}"
+    
 
 
 # ---------------------------------------------------
-# 📌 Orchestrator — NOW WITH LOGGING (ONLY ADDED, NOTHING REMOVED)
+# 📌 Orchestrator (UNCHANGED — INCLUDED FULLY)
 # ---------------------------------------------------
 async def process_verification_record(verification):
     try:
@@ -153,7 +229,6 @@ async def process_verification_record(verification):
             print(f"⚠ Candidate not found: {verification['_id']}")
             return
 
-        # 🔵 LOG: VERIFICATION STARTED
         await activityLogsCol.insert_one({
             "userId": str(verification.get("createdBy")),
             "organizationId": str(verification.get("organizationId")),
@@ -183,7 +258,6 @@ async def process_verification_record(verification):
 
                 status, remarks = await run_verification(check_name, candidate)
 
-                # 🔵 LOG: EACH CHECK RESULT
                 await activityLogsCol.insert_one({
                     "userId": str(verification.get("createdBy")),
                     "organizationId": str(verification.get("organizationId")),
@@ -204,7 +278,6 @@ async def process_verification_record(verification):
 
             await asyncio.sleep(1)
 
-        # UPDATE STATUS
         await verificationsCol.update_one(
             {"_id": verification["_id"]},
             {"$set": {
@@ -218,7 +291,6 @@ async def process_verification_record(verification):
             {"$set": {"status": "VERIFIED"}}
         )
 
-        # 🔵 LOG: VERIFICATION COMPLETED
         await activityLogsCol.insert_one({
             "userId": str(verification.get("createdBy")),
             "organizationId": str(verification.get("organizationId")),
@@ -231,8 +303,6 @@ async def process_verification_record(verification):
 
     except Exception as e:
         print(f"❌ Orchestrator Error: {e}")
-
-        # 🔴 LOG: VERIFICATION FAILED
         await activityLogsCol.insert_one({
             "userId": str(verification.get("createdBy")),
             "organizationId": str(verification.get("organizationId")),

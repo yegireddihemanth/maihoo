@@ -93,7 +93,7 @@ def toStrId(doc):
     return d
 
 async def logActivity(user, action, description, status):
-    # Handle self-verification (no user object)
+    # SELF-verification (public endpoint): no authenticated user
     if user is None:
         userId = None
         userEmail = "self-verification"
@@ -104,6 +104,22 @@ async def logActivity(user, action, description, status):
         userEmail = user.get("email")
         userRole = user.get("role")
         orgId = str(user.get("organizationId")) if user.get("organizationId") else None
+
+    logEntry = {
+        "userId": userId,
+        "userEmail": userEmail,
+        "userRole": userRole,
+        "organizationId": orgId,
+        "action": action,
+        "description": description,
+        "status": status,
+        "timestamp": datetime.now(timezone.utc)
+    }
+
+    # ✅ THIS LINE SAVES THE LOG TO MONGO
+    await activityLogsCol.insert_one(logEntry)
+
+    return True
 
 
 
@@ -2496,6 +2512,45 @@ async def retryCheck(body: dict = Body(...), user: dict = Depends(requireAuth)):
         "canProceed": False
     }
 
+
+@app.post("/secure/candidate/uploadResume")
+async def uploadResume(
+    candidateId: str = Form(...),
+    resume: UploadFile = File(...),
+    user: dict = Depends(requireAuth)
+):
+    try:
+        objId = ObjectId(candidateId)
+    except:
+        raise HTTPException(400, "Invalid candidateId")
+
+    candidate = await candidatesCol.find_one({"_id": objId})
+    if not candidate:
+        raise HTTPException(404, "Candidate not found")
+
+    ext = resume.filename.split(".")[-1].lower()
+    if ext not in ["pdf", "docx"]:
+        raise HTTPException(400, "Only PDF/DOCX allowed")
+
+    savePath = f"/mnt/resumes/{candidateId}.{ext}"
+
+    with open(savePath, "wb") as f:
+        f.write(await resume.read())
+
+    await candidatesCol.update_one(
+        {"_id": objId},
+        {"$set": {"resumePath": savePath}}
+    )
+
+    await logActivity(
+        user,
+        "Resume Uploaded",
+        f"Candidate={candidateId}, Path={savePath}",
+        "Success"
+    )
+
+    return {"message": "Resume uploaded successfully", "path": savePath}
+
 from fastapi import APIRouter, Body, HTTPException, Depends, Form, UploadFile, File
 from datetime import datetime, timedelta, timezone
 from bson import ObjectId
@@ -4333,6 +4388,10 @@ async def createTicket(
     attachments: list[UploadFile] = File(None),
     user: dict = Depends(requireAuth)
 ):
+    print("Logged in user:", user)
+    assignee = await get_assignee(user, usersCol)
+    print("Assignee:", assignee)
+
     data = json.loads(body)
 
     title = data.get("title")

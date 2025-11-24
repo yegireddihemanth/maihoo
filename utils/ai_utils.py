@@ -19,6 +19,8 @@ EMBED_MODEL = "nomic-embed-text"
 EMB_DIM = 768  # force final embedding size
 
 
+
+
 # ------------------------------------------------
 # MONGO
 # ------------------------------------------------
@@ -203,3 +205,55 @@ async def generate_resume_embeddings_and_rank(resumes, jd):
     )
 
     return results[:5], runId
+
+
+# ---------------------------------------------------
+# LLM Resume Validator (uses your existing GPT API)
+# ---------------------------------------------------
+# ---------------------------------------------------
+# USE OLLAMA LLaMA FOR RESUME VALIDATION
+# ---------------------------------------------------
+async def llm_resume_validator(extractedText: str):
+    from ollama import Client
+    client = Client()
+
+    prompt = f"""
+    You are an expert resume validator.
+
+    Analyze the following resume text and identify:
+    - Employment date overlaps
+    - Missing education information
+    - Suspicious gaps
+    - Inconsistent job roles
+    - Fake looking patterns
+
+    Return ONLY this JSON:
+    {{
+        "status": "VALID" or "INVALID",
+        "issues": [...],
+        "explanation": "..."
+    }}
+
+    Resume Text:
+    {extractedText}
+    """
+
+    try:
+        res = client.chat(
+            model="llama3.2",
+            messages=[{"role": "user", "content": prompt}],
+            format="json"        # <-- THIS FORCES STRICT JSON
+        )
+
+        raw = res["message"]["content"]
+
+        # Now we can parse safely
+        import json
+        return json.loads(raw)
+
+    except Exception as e:
+        return {
+            "status": "INVALID",
+            "issues": [f"Model error: {str(e)}"],
+            "explanation": "Could not analyze resume"
+        }
