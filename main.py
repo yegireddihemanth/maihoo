@@ -908,13 +908,18 @@ async def addHelper(body: dict = Body(...), user: dict = Depends(requireAuth)):
     activeUsersCount = await usersCol.count_documents({"organizationId": orgId, "isActive": True})
 
     if activeUsersCount >= totalAllowed:
-        await logActivity(
-            user,
-            "Add Helper Failed",
-            f"User limit reached ({activeUsersCount}/{totalAllowed}) for org {orgId}",
-            "Error"
-        )
-        raise HTTPException(status_code=409, detail="User limit exceeded. Cannot add more helpers.")
+        # Allow SUPER_ADMIN to override
+        if role not in ["SUPER_ADMIN", "SUPER_SPOC"]:
+            await logActivity(
+                user,
+                "Add Helper Failed",
+                f"User limit reached ({activeUsersCount}/{totalAllowed}) for org {orgId}",
+                "Error"
+            )
+            raise HTTPException(
+                status_code=409, 
+                detail=f"User limit exceeded ({activeUsersCount}/{totalAllowed}). Contact Super Admin to increase limit."
+            )
 
     # 🧩 Step 6: Check for duplicate email
     existingUser = await usersCol.find_one({
@@ -1110,17 +1115,18 @@ async def getUsers(request: Request, organizationId: Optional[str] = Query(None)
     # Optional orgId filter from query param
     # -------------------------------
     if organizationId:
+        # First check authorization
+        if allowedOrgIds is not None and str(organizationId) not in allowedOrgIds:
+            raise HTTPException(status_code=404, detail="Organization not found")  # Don't reveal it exists
+        
+        # Then validate format
         try:
             _ = ObjectId(organizationId)
         except Exception:
-            raise HTTPException(status_code=400, detail="Invalid organizationId filter")
-
-        # if restricted roles, check the orgId is within allowed
-        if allowedOrgIds is not None and str(organizationId) not in allowedOrgIds:
-            raise HTTPException(status_code=403, detail="You cannot access users for this organization")
-
-        # limit to that org
+            raise HTTPException(status_code=400, detail="Invalid organizationId format")
+        
         query = {"organizationId": organizationId}
+
 
     else:
         # no explicit filter provided
@@ -2132,9 +2138,11 @@ async def runStage(body: dict = Body(...), user: dict = Depends(requireAuth)):
         if verificationOrgId in accessible:
             allowed = True
     elif role in ["ORG_HR", "SPOC"]:
-        if verificationOrgId == userOrgId and initiatedBy == userEmail:
+        # ✅ FIX: ORG_HR/SPOC can run ANY verification in their org (not just ones they initiated)
+        if verificationOrgId == userOrgId:
             allowed = True
     elif role == "HELPER":
+        # HELPER: stricter - must be their candidate AND their verification
         if(
             verificationOrgId == userOrgId and
             candidate.get("createdBy", "").lower().strip() == userEmail and
