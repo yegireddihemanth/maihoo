@@ -65,11 +65,11 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=origins,
+    allow_origins=origins,  # ✅ Changed from allow_origin_regex to allow_origins
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers = ["set-cookie"]
+    expose_headers=["set-cookie"]
 )
 
 # -------------------------------
