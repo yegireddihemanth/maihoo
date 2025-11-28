@@ -60,6 +60,7 @@ origins = [
     "https://2440df7ab360.ngrok-free.app",
     "https://maihoo.onrender.com",
     "https://bgv-zfdw.onrender.com",
+    "https://deserted-karla-soughfully.ngrok-free.dev",
     
 ]
 
