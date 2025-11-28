@@ -69,7 +69,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_header = ["set-cookie"]
+    expose_headers = ["set-cookie"]
 )
 
 # -------------------------------
