@@ -69,8 +69,22 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["set-cookie"]
+    expose_headers=["set-cookie", "Set-Cookie"]  # Added Set-Cookie for Safari
 )
+
+# Safari/iOS Cookie Fix Middleware
+@app.middleware("http")
+async def safari_cookie_fix(request: Request, call_next):
+    response = await call_next(request)
+    
+    # Add headers to help Safari accept cookies
+    origin = request.headers.get("origin")
+    if origin and origin in origins:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Vary"] = "Origin"
+    
+    return response
 
 # -------------------------------
 # MongoDB Collections
@@ -260,6 +274,17 @@ async def login(body: loginRequest, response: Response):
         samesite=cookieSameSite,
         max_age=cookieMaxAge,
         path="/",
+        domain=None  # Let browser handle domain automatically
+    )
+    
+    # Also set cookie in response headers for Safari/iOS compatibility
+    response.headers["Set-Cookie"] = (
+        f"{cookieName}={token}; "
+        f"Max-Age={cookieMaxAge}; "
+        f"Path=/; "
+        f"{'Secure; ' if cookieSecure else ''}"
+        f"HttpOnly; "
+        f"SameSite={cookieSameSite}"
     )
 
     # --- Fetch organization details ---
