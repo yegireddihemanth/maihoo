@@ -4410,143 +4410,15 @@ from utils.email_utils import send_ticket_email
 import json
 from fastapi import Form, File, UploadFile
 
-@app.post("/secure/createticket")
-async def createTicket(
-    body: str = Form(...),
-    attachments: list[UploadFile] = File(None),
-    user: dict = Depends(requireAuth)
-):
-    print("Logged in user:", user)
-    assignee = await get_assignee(user, usersCol)
-    print("Assignee:", assignee)
+# OLD ENDPOINT REMOVED - Use POST /secure/ticket/create instead
 
-    data = json.loads(body)
-
-    title = data.get("title")
-    description = data.get("description")
-    category = data.get("category")
-    priority = data.get("priority", "MEDIUM")
+# OLD ENDPOINTS REMOVED - Use the following instead:
+# GET /secure/ticket/list?assignedToMe=true (replaces /tickets/my)
+# GET /secure/ticket/list (replaces /tickets/org and /tickets/all with role-based filtering)
+# GET /secure/ticket/{ticketId} (replaces /tickets/{ticketId})
 
 
-    if not title or not description:
-        raise HTTPException(400, "Title and description required")
-
-    orgId = str(user.get("organizationId"))
-
-    # Auto assignment
-    assignee = await get_assignee(user, usersCol)
-    if not assignee:
-        raise HTTPException(500, "Unable to auto-assign ticket")
-
-    # Upload attachments
-    uploaded_files = []
-    if attachments:
-        for f in attachments:
-            upl = cloudinary.uploader.upload(
-                f.file,
-                folder="bgvapp/tickets"
-            )
-            uploaded_files.append({
-                "url": upl["secure_url"],
-                "fileName": f.filename,
-                "uploadedBy": user.get("email"),
-                "uploadedAt": now()
-            })
-
-    ticketDoc = {
-        "title": title,
-        "description": description,
-        "category": category,
-        "priority": priority,
-
-        "createdBy": user.get("email"),
-        "createdById": str(user.get("_id")),
-        "createdByRole": user.get("role"),
-        "organizationId": orgId,
-
-        "status": "OPEN",
-
-        "assignedTo": assignee.get("email"),
-        "assignedToId": str(assignee.get("_id")),
-        "assignedToRole": assignee.get("role"),
-
-        "attachments": uploaded_files,
-        "comments": [],
-
-        "createdAt": now(),
-        "updatedAt": now()
-    }
-
-    res = await ticketsCol.insert_one(ticketDoc)
-    ticketId = str(res.inserted_id)
-
-    # email notify assignee
-    send_ticket_email(
-        assignee["email"],
-        f"New Ticket Assigned - #{ticketId}",
-        f"You have been assigned a ticket.\n\nTitle: {title}\n\nDescription:\n{description}"
-    )
-
-    await logActivity(user, "Ticket Created", f"Created ticket #{ticketId}", "Success")
-
-    return {"message": "Ticket created", "ticketId": ticketId}
-
-## access your tickets
-@app.get("/secure/tickets/my")
-async def getMyTickets(user: dict = Depends(requireAuth)):
-    cursor = ticketsCol.find({"createdBy": user.get("email")}).sort("createdAt", -1)
-    data = await cursor.to_list(None)
-
-    for t in data:
-        t["_id"] = str(t["_id"])
-
-    return {"tickets": data}
-
-
-@app.get("/secure/tickets/org")
-async def getOrgTickets(user: dict = Depends(requireAuth)):
-    """Get all the tickets over the org"""
-    orgId = str(user.get("organizationId"))
-
-    cursor = ticketsCol.find({"organizationId": orgId}).sort("createdAt", -1)
-    data = await cursor.to_list(None)
-
-    for t in data:
-        t["_id"] = str(t["_id"])
-
-    return {"tickets": data}
-
-
-@app.get("/secure/tickets/all")
-async def getAllTickets(user: dict = Depends(requireAuth)):
-    """Get all the tickets over the allorg"""
-    if user.get("role") not in ["SUPER_ADMIN", "SUPER_SPOC"]:
-        raise HTTPException(403, "Not authorized")
-
-    cursor = ticketsCol.find({}).sort("createdAt", -1)
-    data = await cursor.to_list(None)
-
-    for t in data:
-        t["_id"] = str(t["_id"])
-
-    return {"tickets": data}
-
-
-@app.get("/secure/tickets/{ticketId}")
-async def getTicket(ticketId: str, user: dict = Depends(requireAuth)):
-    ticket = await ticketsCol.find_one({"_id": ObjectId(ticketId)})
-    if not ticket:
-        raise HTTPException(404, "Ticket not found")
-
-    # Check org access
-    if str(ticket["organizationId"]) != str(user["organizationId"]) and user.get("role") not in ["SUPER_ADMIN", "SUPER_SPOC"]:
-        raise HTTPException(403, "Not allowed to access this ticket")
-
-    ticket["_id"] = str(ticket["_id"])
-    return ticket
-
-
-@app.post("/secure/tickets/{ticketId}/attachment")
+@app.post("/secure/ticket/{ticketId}/attachment")
 async def uploadTicketAttachment(
     ticketId: str,
     file: UploadFile = File(...),
@@ -4591,128 +4463,12 @@ async def uploadTicketAttachment(
     }
 
 
-@app.post("/secure/tickets/{ticketId}/comment")
-async def addComment(ticketId: str, body: dict = Body(...), user: dict = Depends(requireAuth)):
-    message = body.get("message")
-    if not message:
-        raise HTTPException(400, "Comment cannot be empty")
-
-    ticket = await ticketsCol.find_one({"_id": ObjectId(ticketId)})
-    if not ticket:
-        raise HTTPException(404, "Ticket not found")
-
-    comment = {
-        "commentBy": user.get("email"),
-        "commentByRole": user.get("role"),
-        "message": message,
-        "timestamp": now(),
-        "attachments": []
-    }
-
-    await ticketsCol.update_one(
-        {"_id": ObjectId(ticketId)},
-        {"$push": {"comments": comment}, "$set": {"updatedAt": now()}}
-    )
-
-    send_ticket_email(
-        ticket["assignedTo"],
-        f"New Comment on Ticket #{ticketId}",
-        f"{user.get('email')} commented:\n\n{message}"
-    )
-
-    await logActivity(user, "Ticket Comment Added", f"Commented on ticket #{ticketId}", "Success")
-
-    return {"message": "Comment added"}
-
-@app.post("/secure/tickets/{ticketId}/status")
-async def updateStatus(ticketId: str, body: dict = Body(...), user: dict = Depends(requireAuth)):
-    newStatus = body.get("status")
-
-    if newStatus not in ["OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED", "REOPENED"]:
-        raise HTTPException(400, "Invalid status")
-
-    ticket = await ticketsCol.find_one({"_id": ObjectId(ticketId)})
-    if not ticket:
-        raise HTTPException(404, "Ticket not found")
-
-    role = user.get("role")
-
-    if role == "HELPER":
-        raise HTTPException(403, "HELPER cannot change status")
-
-    await ticketsCol.update_one(
-        {"_id": ObjectId(ticketId)},
-        {"$set": {"status": newStatus, "updatedAt": now()}}
-    )
-
-    send_ticket_email(
-        ticket["createdBy"],
-        f"Ticket #{ticketId} Status Updated",
-        f"Status changed to {newStatus}"
-    )
-
-    await logActivity(user, "Ticket Status Updated", f"#{ticketId} → {newStatus}", "Success")
-
-    return {"message": "Status updated"}
+# OLD ENDPOINTS REMOVED - Use the following instead:
+# POST /secure/ticket/{ticketId}/comment (replaces /tickets/{ticketId}/comment)
+# PUT /secure/ticket/{ticketId}/status (replaces POST /tickets/{ticketId}/status)
 
 
-@app.post("/secure/tickets/{ticketId}/assign")
-async def assignTicket(ticketId: str, body: dict = Body(...), user: dict = Depends(requireAuth)):
-    # Allowed roles
-    if user.get("role") not in ["SPOC", "ORG_HR", "SUPER_ADMIN", "SUPER_SPOC"]:
-        raise HTTPException(403, "Not authorized")
-
-    # Fetch ticket
-    ticket = await ticketsCol.find_one({"_id": ObjectId(ticketId)})
-    if not ticket:
-        raise HTTPException(404, "Ticket not found")
-
-    ticketOrgId = str(ticket.get("organizationId"))
-
-    newAssigneeEmail = body.get("assignee")
-    if not newAssigneeEmail:
-        raise HTTPException(400, "Assignee email is required")
-
-    # Fetch new assignee
-    assignee = await usersCol.find_one({"email": newAssigneeEmail})
-    if not assignee:
-        raise HTTPException(404, "User not found")
-
-    # 🔥 CHECK ORG MATCH — IMPORTANT
-    if str(assignee.get("organizationId")) != ticketOrgId:
-        raise HTTPException(403, "Cannot assign ticket outside the organization")
-
-    # Update ticket
-    await ticketsCol.update_one(
-        {"_id": ObjectId(ticketId)},
-        {
-            "$set": {
-                "assignedTo": assignee["email"],
-                "assignedToId": str(assignee["_id"]),
-                "assignedToRole": assignee["role"],
-                "updatedAt": now()
-            }
-        }
-    )
-
-    # Email notification
-    send_ticket_email(
-        assignee["email"],
-        f"You have been assigned Ticket #{ticketId}",
-        f"You have been assigned a new ticket. Please check your dashboard."
-    )
-
-    await logActivity(
-        user,
-        "Ticket Reassigned",
-        f"Ticket #{ticketId} assigned to {assignee['email']}",
-        "Success"
-    )
-
-    return {"message": "Ticket assigned"}
-
-
-@app.post("/secure/tickets/{ticketId}/close")
+@app.post("/secure/ticket/{ticketId}/close")
 async def closeTicket(
     ticketId: str,
     body: dict = Body(...),
@@ -4752,7 +4508,7 @@ async def closeTicket(
 
     return { "message": "Ticket closed" }
 
-@app.post("/secure/tickets/{ticketId}/reopen")
+@app.post("/secure/ticket/{ticketId}/reopen")
 async def reopenTicket(
     ticketId: str,
     body: dict = Body(...),
@@ -4788,3 +4544,941 @@ async def reopenTicket(
     )
 
     return { "message": "Ticket reopened" }
+
+
+# ============================================================
+#                TICKET MANAGEMENT SYSTEM
+# ============================================================
+
+from utils.ticket_utils import (
+    get_assignee, 
+    calculate_sla_deadline, 
+    notify_team, 
+    generate_ticket_id,
+    TICKET_CATEGORIES
+)
+
+# ------------------------------
+# Get Available Ticket Categories
+# ------------------------------
+@app.get("/secure/ticket/categories")
+async def getTicketCategories(user: dict = Depends(requireAuth)):
+    """Return available ticket categories for UI dropdown"""
+    
+    categories = []
+    for key, info in TICKET_CATEGORIES.items():
+        categories.append({
+            "value": key,
+            "label": info["label"],
+            "description": info["description"],
+            "priority": info["priority"],
+            "sla_hours": info["sla_hours"]
+        })
+    
+    return {"categories": categories}
+
+
+# ------------------------------
+# Create Ticket
+# ------------------------------
+@app.post("/secure/ticket/create")
+async def createTicket(body: dict = Body(...), user: dict = Depends(requireAuth)):
+    """
+    Create a support ticket with smart routing.
+    
+    Body:
+    {
+        "subject": "Cannot login to system",
+        "description": "Getting 401 error when trying to login",
+        "category": "IT_ISSUE",  // IT_ISSUE, VERIFICATION_ISSUE, HR_QUERY, etc.
+        "priority": "HIGH",      // LOW, MEDIUM, HIGH, CRITICAL
+        "attachments": []        // Optional file URLs
+    }
+    """
+    
+    subject = body.get("subject")
+    description = body.get("description")
+    category = body.get("category", "OTHER")
+    priority = body.get("priority", "MEDIUM")
+    attachments = body.get("attachments", [])
+    
+    if not subject or not description:
+        raise HTTPException(status_code=400, detail="subject and description are required")
+    
+    if category not in TICKET_CATEGORIES:
+        raise HTTPException(status_code=400, detail=f"Invalid category. Must be one of: {list(TICKET_CATEGORIES.keys())}")
+    
+    if priority not in ["LOW", "MEDIUM", "HIGH", "CRITICAL"]:
+        raise HTTPException(status_code=400, detail="Invalid priority")
+    
+    # Get user details
+    role = user.get("role")
+    userEmail = user.get("email")
+    userName = user.get("userName")
+    userOrgId = user.get("organizationId")
+    
+    # Fetch organization name
+    orgName = None
+    if userOrgId:
+        try:
+            org = await orgsCol.find_one({"_id": ObjectId(userOrgId)})
+            if org:
+                orgName = org.get("organizationName")
+        except:
+            pass
+    
+    # ✅ NEW WORKFLOW: ALL tickets assigned to BOTH SUPER_ADMIN AND SUPER_SPOC
+    # Find all SUPER_ADMIN and SUPER_SPOC users
+    superUsers = await usersCol.find({
+        "role": {"$in": ["SUPER_ADMIN", "SUPER_SPOC"]},
+        "isActive": True
+    }).to_list(length=None)
+    
+    if not superUsers:
+        # ❌ No SUPER_ADMIN or SUPER_SPOC available
+        categoryLabel = TICKET_CATEGORIES.get(category, {}).get("label", category)
+        raise HTTPException(
+            status_code=503,
+            detail=f"No administrators available to handle {categoryLabel} tickets. "
+                   f"Please contact system administrator."
+        )
+    
+    # Build assignees list (both SUPER_ADMIN and SUPER_SPOC)
+    assignees = []
+    assigneeEmails = []
+    assigneeNames = []
+    
+    for admin in superUsers:
+        assignees.append({
+            "userId": str(admin["_id"]),
+            "email": admin.get("email"),
+            "name": admin.get("userName"),
+            "role": admin.get("role")
+        })
+        assigneeEmails.append(admin.get("email"))
+        assigneeNames.append(admin.get("userName"))
+    
+    # For backward compatibility, use first admin as primary assignee
+    primaryAssignee = superUsers[0]
+    assigneeId = str(primaryAssignee["_id"])
+    assigneeEmail = primaryAssignee.get("email")
+    assigneeName = primaryAssignee.get("userName")
+    assigneeRole = primaryAssignee.get("role")
+    
+    # Calculate SLA deadline
+    slaDeadline = calculate_sla_deadline(category, priority)
+    
+    # Generate ticket ID
+    ticketId = generate_ticket_id()
+    
+    now = datetime.now(timezone.utc).isoformat()
+    
+    # Create ticket document
+    ticketDoc = {
+        "ticketId": ticketId,
+        "subject": subject,
+        "description": description,
+        "category": category,
+        "priority": priority,
+        "status": "OPEN",
+        "createdBy": userEmail,
+        "createdByName": userName,
+        "createdByRole": role,
+        "organizationId": userOrgId,
+        "organizationName": orgName,
+        "assignedTo": assigneeId,  # Primary assignee (backward compatibility)
+        "assignedToEmail": assigneeEmail,
+        "assignedToName": assigneeName,
+        "assignedToRole": assigneeRole,
+        "assignees": assignees,  # ✅ NEW: List of all assignees
+        "assigneeEmails": assigneeEmails,  # ✅ NEW: List of all assignee emails
+        "attachments": attachments,
+        "comments": [],
+        "statusHistory": [{
+            "status": "OPEN",
+            "changedBy": userEmail,
+            "changedAt": now,
+            "comment": "Ticket created"
+        }],
+        "createdAt": now,
+        "updatedAt": now,
+        "slaDeadline": slaDeadline,
+        "resolvedAt": None,
+        "resolution": None
+    }
+    
+    # Insert ticket
+    result = await ticketsCol.insert_one(ticketDoc)
+    
+    # Log activity
+    await logActivity(
+        user,
+        "Ticket Created",
+        f"Ticket {ticketId} created: {subject} (Category: {category}, Priority: {priority})",
+        "Success"
+    )
+    
+    # Send email to ALL assignees (SUPER_ADMIN and SUPER_SPOC)
+    for assignee in assignees:
+        try:
+            send_ticket_email(
+                assignee["email"],
+                f"[{priority}] New Ticket for Review: {subject}",
+                f"""
+Hi {assignee["name"]},
+
+A new ticket has been created and requires your review and assignment:
+
+Ticket ID: {ticketId}
+Category: {category}
+Priority: {priority}
+Created By: {userName} ({userEmail})
+Organization: {orgName or 'N/A'}
+
+Subject: {subject}
+
+Description:
+{description}
+
+SLA Deadline: {slaDeadline}
+
+Please review this ticket and assign it to the appropriate support team member.
+
+Assigned to: {', '.join(assigneeNames)}
+
+Thanks,
+BGVApp Support System
+"""
+            )
+        except Exception as e:
+            print(f"Failed to send email to {assignee['email']}: {e}")
+    
+    # Send email notification to assigned team for awareness
+    try:
+        await notify_team(category, ticketDoc, orgsCol)
+    except Exception as e:
+        print(f"Failed to send team notification: {e}")
+    
+    # Convert ObjectId to string for JSON response
+    ticketResponse = {
+        "_id": str(result.inserted_id),
+        "ticketId": ticketId,
+        "subject": subject,
+        "description": description,
+        "category": category,
+        "priority": priority,
+        "status": "OPEN",
+        "createdBy": userEmail,
+        "createdByName": userName,
+        "createdByRole": role,
+        "organizationId": str(userOrgId) if userOrgId else None,
+        "organizationName": orgName,
+        "assignedTo": assigneeId,
+        "assignedToEmail": assigneeEmail,
+        "assignedToName": assigneeName,
+        "assignedToRole": assigneeRole,
+        "assignees": assignees,  # ✅ NEW: List of all assignees
+        "assigneeEmails": assigneeEmails,  # ✅ NEW: List of all assignee emails
+        "attachments": attachments,
+        "comments": [],
+        "statusHistory": ticketDoc["statusHistory"],
+        "createdAt": now,
+        "updatedAt": now,
+        "slaDeadline": slaDeadline,
+        "resolvedAt": None,
+        "resolution": None
+    }
+    
+    return {
+        "message": "Ticket created successfully and assigned for review",
+        "ticketId": ticketId,
+        "assignedTo": ", ".join(assigneeNames),  # Show all assignees
+        "assignees": assignees,  # ✅ NEW: Full assignee details
+        "slaDeadline": slaDeadline,
+        "note": f"Ticket assigned to {len(assignees)} administrator(s) for review and reassignment to appropriate support team",
+        "ticket": ticketResponse
+    }
+
+
+# ------------------------------
+# Get Tickets (with role-based filtering)
+# ------------------------------
+@app.get("/secure/ticket/list")
+async def getTickets(
+    status: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    priority: Optional[str] = Query(None),
+    assignedToMe: Optional[bool] = Query(False, description="Show only tickets assigned to me"),
+    user: dict = Depends(requireAuth)
+):
+    """
+    Get tickets based on user role with smart filtering:
+    - SUPER_ADMIN/SUPER_SPOC: All tickets
+    - SUPER_ADMIN_HELPER: Tickets from accessible orgs
+    - IT_SUPPORT: IT tickets assigned to them or from accessible orgs
+    - VERIFICATION_SUPPORT: Verification tickets from accessible orgs
+    - SPOC/ORG_HR: Tickets from their org
+    - HELPER: Only tickets they created
+    
+    Query Params:
+    - status: Filter by status (OPEN, IN_PROGRESS, RESOLVED, CLOSED)
+    - category: Filter by category (IT_ISSUE, VERIFICATION_ISSUE, etc.)
+    - priority: Filter by priority (LOW, MEDIUM, HIGH, CRITICAL)
+    - assignedToMe: Show only tickets assigned to current user
+    """
+    
+    role = user.get("role")
+    userEmail = user.get("email")
+    userId = str(user.get("_id"))
+    userOrgId = user.get("organizationId")
+    accessible = user.get("accessibleOrganizations", [])
+    
+    # Build query
+    query = {}
+    
+    # ================================================================
+    # ROLE-BASED FILTERING
+    # ================================================================
+    
+    if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+        # See all tickets (no filter)
+        pass
+    
+    elif role == "SUPER_ADMIN_HELPER":
+        # See tickets from accessible orgs OR assigned to them
+        if accessible:
+            query["$or"] = [
+                {"organizationId": {"$in": [str(x) for x in accessible]}},
+                {"assignedToEmail": userEmail}  # ✅ Can see tickets assigned to them
+            ]
+        else:
+            # No accessible orgs = only see tickets assigned to them
+            query["assignedToEmail"] = userEmail
+    
+    elif role == "IT_SUPPORT":
+        # ✅ NEW: IT Support sees only IT-related tickets
+        query["category"] = "IT_ISSUE"
+        
+        # From accessible orgs OR assigned to them
+        if accessible:
+            query["$or"] = [
+                {"organizationId": {"$in": [str(x) for x in accessible]}},
+                {"assignedToEmail": userEmail}
+            ]
+        else:
+            query["assignedToEmail"] = userEmail
+    
+    elif role == "VERIFICATION_SUPPORT":
+        # ✅ NEW: Verification Support sees only verification tickets
+        query["category"] = "VERIFICATION_ISSUE"
+        
+        if accessible:
+            query["organizationId"] = {"$in": [str(x) for x in accessible]}
+        else:
+            query["assignedToEmail"] = userEmail
+    
+    elif role == "GENERAL_SUPPORT":
+        # ✅ NEW: General Support sees all categories
+        if accessible:
+            query["organizationId"] = {"$in": [str(x) for x in accessible]}
+        else:
+            query["assignedToEmail"] = userEmail
+    
+    elif role in ["SPOC", "ORG_HR"]:
+        # See tickets from their org
+        query["organizationId"] = userOrgId
+    
+    elif role == "HELPER":
+        # See only tickets they created
+        query["createdBy"] = userEmail
+    
+    else:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    # ================================================================
+    # ADDITIONAL FILTERS
+    # ================================================================
+    
+    # Filter by assigned to me (check both old and new format)
+    if assignedToMe:
+        query["$or"] = [
+            {"assignedToEmail": userEmail},  # Old format (single assignee)
+            {"assigneeEmails": {"$in": [userEmail]}}  # New format (multiple assignees)
+        ]
+    
+    # Filter by status
+    if status:
+        query["status"] = status.upper()
+    
+    # Filter by category (if not already set by role)
+    if category and "category" not in query:
+        query["category"] = category.upper()
+    
+    # Filter by priority
+    if priority:
+        query["priority"] = priority.upper()
+    
+    # ================================================================
+    # FETCH TICKETS
+    # ================================================================
+    
+    tickets_cursor = ticketsCol.find(query).sort("createdAt", -1)
+    tickets = []
+    
+    async for ticket in tickets_cursor:
+        ticket["_id"] = str(ticket["_id"])
+        tickets.append(ticket)
+    
+    await logActivity(
+        user,
+        "View Tickets",
+        f"{userEmail} ({role}) viewed {len(tickets)} tickets with filters: {query}",
+        "Success"
+    )
+    
+    return {
+        "total": len(tickets),
+        "tickets": tickets,
+        "filters": {
+            "role": role,
+            "assignedToMe": assignedToMe,
+            "status": status,
+            "category": category,
+            "priority": priority
+        }
+    }
+
+
+# ------------------------------
+# Get Single Ticket
+# ------------------------------
+@app.get("/secure/ticket/{ticketId}")
+async def getTicket(ticketId: str, user: dict = Depends(requireAuth)):
+    """Get ticket details with authorization check"""
+    
+    ticket = await ticketsCol.find_one({"ticketId": ticketId})
+    
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    
+    # Authorization check
+    role = user.get("role")
+    userEmail = user.get("email")
+    userOrgId = user.get("organizationId")
+    accessible = user.get("accessibleOrganizations", [])
+    
+    allowed = False
+    
+    if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+        allowed = True
+    elif role == "SUPER_ADMIN_HELPER":
+        if ticket.get("organizationId") in [str(x) for x in accessible]:
+            allowed = True
+    elif role in ["SPOC", "ORG_HR"]:
+        if ticket.get("organizationId") == userOrgId:
+            allowed = True
+    elif role == "HELPER":
+        if ticket.get("createdBy") == userEmail or ticket.get("assignedToEmail") == userEmail:
+            allowed = True
+    
+    if not allowed:
+        raise HTTPException(status_code=403, detail="Not authorized to view this ticket")
+    
+    ticket["_id"] = str(ticket["_id"])
+    return ticket
+
+
+# ------------------------------
+# Update Ticket Status
+# ------------------------------
+@app.put("/secure/ticket/{ticketId}/status")
+async def updateTicketStatus(
+    ticketId: str,
+    body: dict = Body(...),
+    user: dict = Depends(requireAuth)
+):
+    """
+    Update ticket status.
+    
+    Body:
+    {
+        "status": "IN_PROGRESS" | "RESOLVED" | "CLOSED" | "REOPENED",
+        "comment": "Working on this issue",
+        "resolution": "Fixed by restarting server"  // Required for RESOLVED
+    }
+    """
+    
+    newStatus = body.get("status")
+    comment = body.get("comment", "")
+    resolution = body.get("resolution")
+    
+    if not newStatus:
+        raise HTTPException(status_code=400, detail="status is required")
+    
+    if newStatus not in ["OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED", "REOPENED"]:
+        raise HTTPException(status_code=400, detail="Invalid status")
+    
+    if newStatus == "RESOLVED" and not resolution:
+        raise HTTPException(status_code=400, detail="resolution is required for RESOLVED status")
+    
+    # Find ticket
+    ticket = await ticketsCol.find_one({"ticketId": ticketId})
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    
+    # Authorization: Only assignee or admins can update
+    role = user.get("role")
+    userEmail = user.get("email")
+    accessible = user.get("accessibleOrganizations", [])
+    
+    allowed = False
+    
+    # SUPER_ADMIN / SUPER_SPOC → full access
+    if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+        allowed = True
+    
+    # Assigned to this user → can update (check both formats)
+    elif (ticket.get("assignedToEmail") == userEmail or 
+          userEmail in ticket.get("assigneeEmails", [])):
+        allowed = True
+    
+    # SPOC / ORG_HR → can update tickets in their org
+    elif role in ["SPOC", "ORG_HR"] and ticket.get("organizationId") == user.get("organizationId"):
+        allowed = True
+    
+    # ✅ NEW: IT_SUPPORT → can update IT tickets from accessible orgs
+    elif role == "IT_SUPPORT":
+        if ticket.get("category") == "IT_ISSUE":
+            if not accessible or ticket.get("organizationId") in [str(x) for x in accessible]:
+                allowed = True
+    
+    # ✅ NEW: VERIFICATION_SUPPORT → can update verification tickets
+    elif role == "VERIFICATION_SUPPORT":
+        if ticket.get("category") == "VERIFICATION_ISSUE":
+            if not accessible or ticket.get("organizationId") in [str(x) for x in accessible]:
+                allowed = True
+    
+    # ✅ NEW: GENERAL_SUPPORT → can update any ticket from accessible orgs
+    elif role == "GENERAL_SUPPORT":
+        if not accessible or ticket.get("organizationId") in [str(x) for x in accessible]:
+            allowed = True
+    
+    # ✅ NEW: SUPER_ADMIN_HELPER → can update tickets assigned to them
+    elif role == "SUPER_ADMIN_HELPER":
+        if (ticket.get("assignedToEmail") == userEmail or 
+            userEmail in ticket.get("assigneeEmails", [])):
+            allowed = True
+    
+    if not allowed:
+        raise HTTPException(status_code=403, detail="Only assigned user or admins can update ticket")
+    
+    # Update ticket
+    now = datetime.now(timezone.utc).isoformat()
+    
+    # Build update operations
+    setData = {
+        "status": newStatus,
+        "updatedAt": now
+    }
+    
+    if newStatus == "RESOLVED":
+        setData["resolvedAt"] = now
+        setData["resolution"] = resolution
+    
+    # Perform update with both $set and $push
+    await ticketsCol.update_one(
+        {"ticketId": ticketId},
+        {
+            "$set": setData,
+            "$push": {
+                "statusHistory": {
+                    "status": newStatus,
+                    "changedBy": userEmail,
+                    "changedAt": now,
+                    "comment": comment
+                }
+            }
+        }
+    )
+    
+    # Log activity
+    await logActivity(
+        user,
+        "Ticket Status Updated",
+        f"Ticket {ticketId} status changed to {newStatus}",
+        "Success"
+    )
+    
+    # Send email to creator
+    try:
+        send_ticket_email(
+            ticket.get("createdBy"),
+            f"Ticket {ticketId} Status Updated: {newStatus}",
+            f"""
+Hi {ticket.get("createdByName")},
+
+Your ticket has been updated:
+
+Ticket ID: {ticketId}
+Subject: {ticket.get("subject")}
+New Status: {newStatus}
+Updated By: {user.get("userName")} ({userEmail})
+
+Comment: {comment}
+
+{f"Resolution: {resolution}" if resolution else ""}
+
+Thanks,
+BGVApp Support Team
+"""
+        )
+    except Exception as e:
+        print(f"Failed to send status update email: {e}")
+    
+    return {"message": "Ticket status updated successfully"}
+
+
+# ------------------------------
+# Add Comment to Ticket
+# ------------------------------
+@app.post("/secure/ticket/{ticketId}/comment")
+async def addTicketComment(
+    ticketId: str,
+    body: dict = Body(...),
+    user: dict = Depends(requireAuth)
+):
+    """Add a comment to a ticket"""
+    
+    comment = body.get("comment")
+    
+    if not comment:
+        raise HTTPException(status_code=400, detail="comment is required")
+    
+    # Find ticket
+    ticket = await ticketsCol.find_one({"ticketId": ticketId})
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    
+    # ✅ NEW AUTHORIZATION: Only specific roles can comment
+    role = user.get("role")
+    userEmail = user.get("email")
+    
+    allowed = False
+    
+    # 1. SUPER_ADMIN / SUPER_SPOC → can comment on any ticket
+    if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+        allowed = True
+    
+    # 2. Ticket creator (ORG_HR/HELPER who created it) → can comment
+    elif ticket.get("createdBy") == userEmail:
+        allowed = True
+    
+    # 3. Currently assigned user → can comment (check both formats)
+    elif (ticket.get("assignedToEmail") == userEmail or 
+          userEmail in ticket.get("assigneeEmails", [])):
+        allowed = True
+    
+    # 4. ORG_HR/SPOC from same organization → can comment
+    elif role in ["SPOC", "ORG_HR"] and ticket.get("organizationId") == user.get("organizationId"):
+        allowed = True
+    
+    # ❌ All other users cannot comment
+    if not allowed:
+        raise HTTPException(status_code=403, detail="Only ticket creator, assignee, or organization admins can comment")
+    
+    # Add comment
+    now = datetime.now(timezone.utc).isoformat()
+    
+    commentObj = {
+        "comment": comment,
+        "commentedBy": userEmail,
+        "commentedByName": user.get("userName"),
+        "commentedByRole": role,
+        "commentedAt": now
+    }
+    
+    await ticketsCol.update_one(
+        {"ticketId": ticketId},
+        {
+            "$push": {"comments": commentObj},
+            "$set": {"updatedAt": now}
+        }
+    )
+    
+    # Log activity
+    await logActivity(
+        user,
+        "Ticket Comment Added",
+        f"Comment added to ticket {ticketId}",
+        "Success"
+    )
+    
+    return {"message": "Comment added successfully", "comment": commentObj}
+
+
+# ------------------------------
+# Reassign Ticket
+# ------------------------------
+@app.put("/secure/ticket/{ticketId}/reassign")
+async def reassignTicket(
+    ticketId: str,
+    body: dict = Body(...),
+    user: dict = Depends(requireAuth)
+):
+    """Reassign ticket to another user (admin only)"""
+    
+    newAssigneeEmail = body.get("assignedToEmail")
+    reason = body.get("reason", "")
+    
+    if not newAssigneeEmail:
+        raise HTTPException(status_code=400, detail="assignedToEmail is required")
+    
+    # Find ticket first
+    ticket = await ticketsCol.find_one({"ticketId": ticketId})
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    
+    # ✅ NEW: Admins OR assigned person can reassign
+    role = user.get("role")
+    userEmail = user.get("email")
+    isAssignee = ticket.get("assignedToEmail") == userEmail
+    
+    if role not in ["SUPER_ADMIN", "SUPER_SPOC", "SPOC", "ORG_HR"] and not isAssignee:
+        raise HTTPException(status_code=403, detail="Only admins or the assigned person can reassign tickets")
+    
+    # Find new assignee
+    newAssignee = await usersCol.find_one({"email": newAssigneeEmail, "isActive": True})
+    if not newAssignee:
+        raise HTTPException(status_code=404, detail="Assignee not found or inactive")
+    
+    # ✅ Check if new assignee has access to ticket's organization
+    ticketOrgId = ticket.get("organizationId")
+    assigneeRole = newAssignee.get("role")
+    assigneeAccessibleOrgs = newAssignee.get("accessibleOrganizations", [])
+    
+    # SUPER_ADMIN and SUPER_SPOC have access to all orgs
+    if assigneeRole not in ["SUPER_ADMIN", "SUPER_SPOC"]:
+        # For other roles, check if they have access to this org
+        if assigneeRole == "SUPER_ADMIN_HELPER":
+            if ticketOrgId not in [str(x) for x in assigneeAccessibleOrgs]:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"User '{newAssigneeEmail}' does not have access to organization '{ticket.get('organizationName')}'. "
+                           f"Please add this organization to their accessibleOrganizations."
+                )
+        elif assigneeRole in ["SPOC", "ORG_HR", "HELPER"]:
+            # Must be from the same organization
+            if str(newAssignee.get("organizationId")) != ticketOrgId:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"User '{newAssigneeEmail}' belongs to a different organization and cannot be assigned this ticket."
+                )
+    
+    # 🔥 NEW: Category-based role validation
+    ticketCategory = ticket.get("category", "OTHER")
+    categoryInfo = TICKET_CATEGORIES.get(ticketCategory, TICKET_CATEGORIES["OTHER"])
+    targetTeam = categoryInfo["assignTo"]
+    
+    # Define role mappings for each team category
+    TEAM_ROLE_MAPPING = {
+        "IT_TEAM": ["SUPER_ADMIN", "SUPER_SPOC", "SUPER_ADMIN_HELPER", "IT_SUPPORT", "TECHNICAL_SUPPORT", "HELPER"],
+        "VERIFICATION_TEAM": ["SUPER_ADMIN", "SUPER_SPOC", "SUPER_ADMIN_HELPER", "VERIFICATION_SPECIALIST", "ORG_HR", "HELPER"],
+        "HR_TEAM": ["SUPER_ADMIN", "SUPER_SPOC", "SUPER_ADMIN_HELPER", "HR_SPECIALIST", "ORG_HR", "HELPER"],
+        "FINANCE_TEAM": ["SUPER_ADMIN", "SUPER_SPOC", "SUPER_ADMIN_HELPER", "FINANCE_SPECIALIST", "SPOC", "ORG_HR"],
+        "PRODUCT_TEAM": ["SUPER_ADMIN", "SUPER_SPOC", "SUPER_ADMIN_HELPER", "PRODUCT_MANAGER", "SPOC"],
+        "DEV_TEAM": ["SUPER_ADMIN", "SUPER_SPOC", "SUPER_ADMIN_HELPER", "DEVELOPER", "TECHNICAL_LEAD", "SPOC"],
+        "SUPPORT_TEAM": ["SUPER_ADMIN", "SUPER_SPOC", "SUPER_ADMIN_HELPER", "SUPPORT_SPECIALIST", "ORG_HR", "HELPER"]
+    }
+    
+    # Check if assignee role is valid for the ticket category
+    allowedRoles = TEAM_ROLE_MAPPING.get(targetTeam, ["SUPER_ADMIN", "SUPER_SPOC", "SUPER_ADMIN_HELPER", "ORG_HR", "HELPER"])
+    
+    if assigneeRole not in allowedRoles:
+        raise HTTPException(
+            status_code=403,
+            detail=f"User role '{assigneeRole}' is not authorized to handle {categoryInfo['label']} tickets. "
+                   f"This ticket requires one of these roles: {', '.join(allowedRoles)}. "
+                   f"Please assign to a user with appropriate role for {targetTeam}."
+        )
+    
+    # Update ticket with new assignee
+    now = datetime.now(timezone.utc).isoformat()
+    
+    # Build new assignee object
+    newAssigneeObj = {
+        "userId": str(newAssignee["_id"]),
+        "email": newAssignee.get("email"),
+        "name": newAssignee.get("userName"),
+        "role": newAssignee.get("role")
+    }
+    
+    await ticketsCol.update_one(
+        {"ticketId": ticketId},
+        {
+            "$set": {
+                # Single assignee fields (for backward compatibility)
+                "assignedTo": str(newAssignee["_id"]),
+                "assignedToEmail": newAssignee.get("email"),
+                "assignedToName": newAssignee.get("userName"),
+                "assignedToRole": newAssignee.get("role"),
+                # 🔥 NEW: Update assignees array to reflect new assignee
+                "assignees": [newAssigneeObj],
+                "assigneeEmails": [newAssignee.get("email")],
+                "updatedAt": now
+            },
+            "$push": {
+                "statusHistory": {
+                    "status": "REASSIGNED",
+                    "changedBy": user.get("email"),
+                    "changedAt": now,
+                    "comment": f"Reassigned to {newAssignee.get('userName')}. Reason: {reason}"
+                }
+            }
+        }
+    )
+    
+    # Log activity
+    await logActivity(
+        user,
+        "Ticket Reassigned",
+        f"Ticket {ticketId} reassigned to {newAssigneeEmail}",
+        "Success"
+    )
+    
+    # Send email to new assignee
+    try:
+        send_ticket_email(
+            newAssigneeEmail,
+            f"Ticket {ticketId} Assigned to You",
+            f"""
+Hi {newAssignee.get("userName")},
+
+A ticket has been reassigned to you:
+
+Ticket ID: {ticketId}
+Subject: {ticket.get("subject")}
+Category: {ticket.get("category")}
+Priority: {ticket.get("priority")}
+Reassigned By: {user.get("userName")}
+
+Reason: {reason}
+
+Please review and respond.
+
+Thanks,
+BGVApp Support System
+"""
+        )
+    except Exception as e:
+        print(f"Failed to send reassignment email: {e}")
+    
+    return {"message": "Ticket reassigned successfully"}
+
+
+# ------------------------------
+# Get Available Assignees for Ticket
+# ------------------------------
+@app.get("/secure/ticket/{ticketId}/available-assignees")
+async def getAvailableAssignees(ticketId: str, user: dict = Depends(requireAuth)):
+    """
+    Get list of users who can be assigned to this ticket based on category and organization access.
+    Only SUPER_ADMIN and SUPER_SPOC can access this endpoint.
+    """
+    
+    # Authorization check
+    if user.get("role") not in ["SUPER_ADMIN", "SUPER_SPOC"]:
+        raise HTTPException(403, "Only SUPER_ADMIN and SUPER_SPOC can view available assignees")
+
+    # Fetch ticket
+    ticket = await ticketsCol.find_one({"ticketId": ticketId})
+    if not ticket:
+        raise HTTPException(404, "Ticket not found")
+
+    ticketOrgId = ticket.get("organizationId")
+    ticketCategory = ticket.get("category", "OTHER")
+    
+    # Get category info
+    categoryInfo = TICKET_CATEGORIES.get(ticketCategory, TICKET_CATEGORIES["OTHER"])
+    targetTeam = categoryInfo["assignTo"]
+    
+    # Define role mappings for each team category
+    TEAM_ROLE_MAPPING = {
+        "IT_TEAM": ["SUPER_ADMIN", "SUPER_SPOC", "SUPER_ADMIN_HELPER", "IT_SUPPORT", "TECHNICAL_SUPPORT", "HELPER"],
+        "VERIFICATION_TEAM": ["SUPER_ADMIN", "SUPER_SPOC", "SUPER_ADMIN_HELPER", "VERIFICATION_SPECIALIST", "ORG_HR", "HELPER"],
+        "HR_TEAM": ["SUPER_ADMIN", "SUPER_SPOC", "SUPER_ADMIN_HELPER", "HR_SPECIALIST", "ORG_HR", "HELPER"],
+        "FINANCE_TEAM": ["SUPER_ADMIN", "SUPER_SPOC", "SUPER_ADMIN_HELPER", "FINANCE_SPECIALIST", "SPOC", "ORG_HR"],
+        "PRODUCT_TEAM": ["SUPER_ADMIN", "SUPER_SPOC", "SUPER_ADMIN_HELPER", "PRODUCT_MANAGER", "SPOC"],
+        "DEV_TEAM": ["SUPER_ADMIN", "SUPER_SPOC", "SUPER_ADMIN_HELPER", "DEVELOPER", "TECHNICAL_LEAD", "SPOC"],
+        "SUPPORT_TEAM": ["SUPER_ADMIN", "SUPER_SPOC", "SUPER_ADMIN_HELPER", "SUPPORT_SPECIALIST", "ORG_HR", "HELPER"]
+    }
+    
+    allowedRoles = TEAM_ROLE_MAPPING.get(targetTeam, ["SUPER_ADMIN", "SUPER_SPOC", "SUPER_ADMIN_HELPER", "ORG_HR", "HELPER"])
+    
+    # Build query for finding eligible users
+    userQuery = {
+        "role": {"$in": allowedRoles},
+        "isActive": True
+    }
+    
+    # Find users with appropriate roles
+    allEligibleUsers = await usersCol.find(userQuery).to_list(length=None)
+    
+    # Filter by organization access
+    availableUsers = []
+    
+    for user_doc in allEligibleUsers:
+        userRole = user_doc.get("role")
+        userOrgId = str(user_doc.get("organizationId", ""))
+        userAccessibleOrgs = [str(x) for x in user_doc.get("accessibleOrganizations", [])]
+        
+        # Check organization access
+        hasOrgAccess = False
+        
+        if userRole in ["SUPER_ADMIN", "SUPER_SPOC"]:
+            # SUPER_ADMIN and SUPER_SPOC have access to all orgs
+            hasOrgAccess = True
+        elif userRole == "SUPER_ADMIN_HELPER":
+            # Must have this org in accessibleOrganizations
+            hasOrgAccess = ticketOrgId in userAccessibleOrgs
+        elif userRole in ["SPOC", "ORG_HR", "HELPER"]:
+            # 🔥 FIXED: Only include BGV support staff, not regular client org users
+            # Regular client org users should handle tickets through their own workflow
+            # Only BGV central support staff should be assignable by SUPER_ADMIN
+            
+            # Define BGV central organization ID (where support staff belong)
+            BGV_CENTRAL_ORG_ID = "68ffb000e4b2a7e23ccf1e50"  # Update this to your BGV org ID
+            
+            # Only include users who are BGV support staff (from central org)
+            # AND have access to the ticket's organization
+            if userOrgId == BGV_CENTRAL_ORG_ID:
+                # BGV support staff - check if they have access to ticket's org
+                if hasattr(user_doc, 'accessibleOrganizations') and user_doc.get('accessibleOrganizations'):
+                    # Support staff with specific org access
+                    hasOrgAccess = ticketOrgId in userAccessibleOrgs
+                else:
+                    # Support staff from same org as ticket (if BGV is handling their own tickets)
+                    hasOrgAccess = userOrgId == ticketOrgId
+            else:
+                # Regular client org users - exclude from SUPER_ADMIN assignable list
+                hasOrgAccess = False
+        
+        if hasOrgAccess:
+            availableUsers.append({
+                "userId": str(user_doc["_id"]),
+                "email": user_doc["email"],
+                "name": user_doc.get("userName", user_doc["email"]),
+                "role": user_doc["role"],
+                "organizationId": userOrgId,
+                "phoneNumber": user_doc.get("phoneNumber", ""),
+                "accessibleOrganizations": userAccessibleOrgs if userRole == "SUPER_ADMIN_HELPER" else []
+            })
+    
+    return {
+        "ticketId": ticketId,
+        "category": categoryInfo["label"],
+        "targetTeam": targetTeam,
+        "allowedRoles": allowedRoles,
+        "availableAssignees": availableUsers,
+        "organizationId": ticketOrgId,
+        "organizationName": ticket.get("organizationName", "Unknown")
+    }
