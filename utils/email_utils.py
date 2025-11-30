@@ -213,3 +213,92 @@ def send_ticket_email(toEmail, subject, body):
         service.users().messages().send(userId="me", body={"raw": raw}).execute()
     except Exception as e:
         print("Email sending failed:", str(e))
+
+
+def send_verification_consent_email(to_email, candidate_name, organization_name, 
+                                  verification_checks, consent_token, expires_at, 
+                                  consent_url=None):
+    """
+    Sends consent email to candidate before starting backend verification.
+    
+    Args:
+        to_email: Candidate's email
+        candidate_name: Candidate's name
+        organization_name: Organization requesting verification
+        verification_checks: List of checks to be performed
+        consent_token: Unique token for consent validation
+        expires_at: Token expiration time
+        consent_url: Frontend consent page URL (optional)
+    """
+    
+    # Default consent URL if not provided
+    if not consent_url:
+        consent_url = "https://bgv-zfdw.onrender.com/candidate/consent"
+    
+    # Build consent link with token
+    consent_link = f"{consent_url}?token={consent_token}"
+    
+    # Format verification checks list
+    checks_list = ""
+    for i, check in enumerate(verification_checks, 1):
+        checks_list += f"{i}. {check.get('name', 'Unknown Check')}\n"
+        if check.get('description'):
+            checks_list += f"   - {check['description']}\n"
+    
+    body = f"""
+Dear {candidate_name},
+
+{organization_name} has requested to perform background verification checks on your profile.
+
+Before we begin the verification process, we need your explicit consent to proceed with the following checks:
+
+VERIFICATION CHECKS TO BE PERFORMED:
+{checks_list}
+
+IMPORTANT INFORMATION:
+- These checks will be conducted by our verification team
+- Your personal information will be handled securely and confidentially
+- You have the right to know what checks are being performed
+- This consent is required before any verification can begin
+
+WHAT YOU NEED TO DO:
+1. Click the consent link below
+2. Review the detailed list of verification checks
+3. Provide your consent by checking the agreement box
+4. Submit your response
+
+CONSENT LINK: {consent_link}
+
+This consent link will expire on: {expires_at}
+
+If you have any questions about these verification checks or need clarification, please contact:
+- Organization: {organization_name}
+- Support: support@bgvapp.in
+
+If you did not expect this verification request, please contact us immediately.
+
+Thank you for your cooperation.
+
+Best regards,
+BGVApp Verification Team
+"""
+
+    # Create and send email
+    message = MIMEText(body)
+    message["to"] = to_email
+    message["from"] = "me"
+    message["subject"] = f"Verification Consent Required - {organization_name}"
+
+    raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+
+    try:
+        service = _load_gmail_service()
+        service.users().messages().send(
+            userId="me",
+            body={"raw": raw_message}
+        ).execute()
+
+        print(f"Verification consent email sent successfully to: {to_email}")
+    except Exception as e:
+        print(f"Error sending verification consent email: {str(e)}")
+        raise Exception(f"GMAIL API ERROR: {str(e)}")

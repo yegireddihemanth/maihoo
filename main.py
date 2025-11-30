@@ -4424,7 +4424,7 @@ async def uploadTicketAttachment(
     file: UploadFile = File(...),
     user: dict = Depends(requireAuth)
 ):
-    ticket = await ticketsCol.find_one({"_id": ObjectId(ticketId)})
+    ticket = await ticketsCol.find_one({"ticketId": ticketId})
     if not ticket:
         raise HTTPException(404, "Ticket not found")
 
@@ -4446,7 +4446,7 @@ async def uploadTicketAttachment(
     }
 
     await ticketsCol.update_one(
-        {"_id": ObjectId(ticketId)},
+        {"ticketId": ticketId},
         {"$push": {"attachments": attachmentObj}}
     )
 
@@ -4474,21 +4474,43 @@ async def closeTicket(
     body: dict = Body(...),
     user: dict = Depends(requireAuth)
 ):
-    if user.get("role") not in ["ORG_HR", "SPOC", "SUPER_ADMIN", "SUPER_SPOC"]:
-        raise HTTPException(403, "Not authorized")
-
     reason = body.get("reason", "No reason provided")
 
-    ticket = await ticketsCol.find_one({"_id": ObjectId(ticketId)})
+    ticket = await ticketsCol.find_one({"ticketId": ticketId})
     if not ticket:
         raise HTTPException(404, "Ticket not found")
 
-    # org restriction
-    if str(ticket["organizationId"]) != str(user["organizationId"]):
-        raise HTTPException(403, "Not allowed to close ticket of another org")
+    # 🔥 FIXED: Enhanced authorization logic
+    userRole = user.get("role")
+    userEmail = user.get("email")
+    userOrgId = str(user.get("organizationId", ""))
+    ticketOrgId = str(ticket.get("organizationId", ""))
+    
+    # Check if user can close this ticket
+    canClose = False
+    
+    # 1. SUPER_ADMIN and SUPER_SPOC can close any ticket (global access)
+    if userRole in ["SUPER_ADMIN", "SUPER_SPOC"]:
+        canClose = True
+    
+    # 2. ORG_HR and SPOC can close tickets from their own organization
+    elif userRole in ["ORG_HR", "SPOC"]:
+        if userOrgId == ticketOrgId:
+            canClose = True
+    
+    # 3. Assigned user can close their assigned tickets
+    elif userEmail == ticket.get("assignedToEmail"):
+        canClose = True
+    
+    # 4. Ticket creator can close their own tickets
+    elif userEmail == ticket.get("createdBy"):
+        canClose = True
+    
+    if not canClose:
+        raise HTTPException(403, f"Not authorized to close this ticket. Role: {userRole}")
 
     await ticketsCol.update_one(
-        {"_id": ObjectId(ticketId)},
+        {"ticketId": ticketId},
         {
             "$set": {
                 "status": "CLOSED",
@@ -4516,16 +4538,41 @@ async def reopenTicket(
 ):
     reason = body.get("reason", "No reason provided")
 
-    ticket = await ticketsCol.find_one({"_id": ObjectId(ticketId)})
+    ticket = await ticketsCol.find_one({"ticketId": ticketId})
     if not ticket:
         raise HTTPException(404, "Ticket not found")
 
-    # org restriction
-    if str(ticket["organizationId"]) != str(user["organizationId"]):
-        raise HTTPException(403, "Not allowed to reopen ticket of another org")
+    # 🔥 FIXED: Enhanced authorization logic (same as close ticket)
+    userRole = user.get("role")
+    userEmail = user.get("email")
+    userOrgId = str(user.get("organizationId", ""))
+    ticketOrgId = str(ticket.get("organizationId", ""))
+    
+    # Check if user can reopen this ticket
+    canReopen = False
+    
+    # 1. SUPER_ADMIN and SUPER_SPOC can reopen any ticket (global access)
+    if userRole in ["SUPER_ADMIN", "SUPER_SPOC"]:
+        canReopen = True
+    
+    # 2. ORG_HR and SPOC can reopen tickets from their own organization
+    elif userRole in ["ORG_HR", "SPOC"]:
+        if userOrgId == ticketOrgId:
+            canReopen = True
+    
+    # 3. Assigned user can reopen their assigned tickets
+    elif userEmail == ticket.get("assignedToEmail"):
+        canReopen = True
+    
+    # 4. Ticket creator can reopen their own tickets
+    elif userEmail == ticket.get("createdBy"):
+        canReopen = True
+    
+    if not canReopen:
+        raise HTTPException(403, f"Not authorized to reopen this ticket. Role: {userRole}")
 
     await ticketsCol.update_one(
-        {"_id": ObjectId(ticketId)},
+        {"ticketId": ticketId},
         {
             "$set": {
                 "status": "REOPENED",
@@ -4544,6 +4591,362 @@ async def reopenTicket(
     )
 
     return { "message": "Ticket reopened" }
+
+
+# ============================================================
+#                VERIFICATION CONSENT SYSTEM
+# ============================================================
+
+import secrets
+from datetime import datetime, timedelta
+from utils.email_utils import send_verification_consent_email
+
+# ------------------------------
+# Send Verification Consent Email
+# ------------------------------
+@app.post("/secure/verification/{candidateId}/send-consent")
+async def sendVerificationConsent(
+    candidateId: str,
+    body: dict = Body(...),
+    user: dict = Depends(requireAuth)
+):
+    """
+    Send consent email to candidate before starting backend verification.
+    
+    Request Body:
+    {
+        "verificationChecks": [
+            {
+                "name": "Employment Verification",
+                "description": "Verify employment history and job titles"
+            },
+            {
+                "name": "Education Verification", 
+                "description": "Verify educational qualifications and degrees"
+            }
+        ],
+        "consentUrl": "https://your-frontend.com/consent" // Optional
+    }
+    """
+    
+    # Authorization check
+    if user.get("role") not in ["SUPER_ADMIN", "SUPER_SPOC", "ORG_HR", "SPOC", "SUPER_ADMIN_HELPER"]:
+        raise HTTPException(403, "Not authorized to send consent emails")
+    
+    # Validate candidate ID
+    try:
+        candidate_obj_id = ObjectId(candidateId)
+    except:
+        raise HTTPException(400, "Invalid candidate ID")
+    
+    # Fetch candidate
+    candidate = await candidatesCol.find_one({"_id": candidate_obj_id})
+    if not candidate:
+        raise HTTPException(404, "Candidate not found")
+    
+    # Check organization access
+    candidate_org_id = str(candidate.get("organizationId", ""))
+    user_org_id = str(user.get("organizationId", ""))
+    user_role = user.get("role")
+    
+    # Organization access validation
+    has_access = False
+    if user_role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+        has_access = True
+    elif user_role == "SUPER_ADMIN_HELPER":
+        accessible_orgs = user.get("accessibleOrganizations", [])
+        has_access = candidate_org_id in [str(org) for org in accessible_orgs]
+    elif user_role in ["ORG_HR", "SPOC"]:
+        has_access = candidate_org_id == user_org_id
+    
+    if not has_access:
+        raise HTTPException(403, "Not authorized to access this candidate")
+    
+    # Get request data
+    verification_checks = body.get("verificationChecks", [])
+    
+    if not verification_checks:
+        raise HTTPException(400, "Verification checks list is required")
+    
+    # Check if consent already given
+    if candidate.get("consentAcknowledged") == True:
+        return {
+            "message": "Consent already provided by candidate",
+            "consentStatus": "ALREADY_GIVEN",
+            "consentDate": candidate.get("consentDate")
+        }
+    
+    # Generate consent token
+    consent_token = secrets.token_urlsafe(32)
+    expires_at = datetime.utcnow() + timedelta(hours=48)  # 48 hours expiry
+    
+    # Update candidate with consent token
+    await candidatesCol.update_one(
+        {"_id": candidate_obj_id},
+        {
+            "$set": {
+                "consentToken": consent_token,
+                "consentTokenExpiry": expires_at.isoformat(),
+                "consentRequested": True,
+                "consentRequestedAt": datetime.utcnow().isoformat(),
+                "consentRequestedBy": user.get("email"),
+                "verificationChecksRequested": verification_checks,
+                "updatedAt": datetime.utcnow().isoformat()
+            }
+        }
+    )
+    
+    # Get organization name
+    org_name = candidate.get("organizationName", "Unknown Organization")
+    
+    # Send consent email
+    try:
+        # Construct candidate name from firstName and lastName
+        candidate_name = f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip()
+        if not candidate_name:
+            candidate_name = candidate.get("email", "Candidate")
+        
+        send_verification_consent_email(
+            to_email=candidate.get("email"),
+            candidate_name=candidate_name,
+            organization_name=org_name,
+            verification_checks=verification_checks,
+            consent_token=consent_token,
+            expires_at=expires_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+        )
+        
+        # Log activity
+        await logActivity(
+            user,
+            "Verification Consent Sent",
+            f"Consent email sent to {candidate.get('email')} for candidate {candidateId}",
+            "Success"
+        )
+        
+        return {
+            "message": "Verification consent email sent successfully",
+            "candidateId": candidateId,
+            "candidateEmail": candidate.get("email"),
+            "consentToken": consent_token,
+            "expiresAt": expires_at.isoformat(),
+            "checksRequested": len(verification_checks)
+        }
+        
+    except Exception as e:
+        # Log error
+        await logActivity(
+            user,
+            "Verification Consent Failed",
+            f"Failed to send consent email to {candidate.get('email')}: {str(e)}",
+            "Error"
+        )
+        raise HTTPException(500, f"Failed to send consent email: {str(e)}")
+
+
+# ------------------------------
+# Get Consent Details (Public - No Auth Required)
+# ------------------------------
+@app.get("/public/verification-consent/{token}")
+async def getConsentDetails(token: str):
+    """
+    Get consent details for candidate using token (public endpoint for consent page).
+    """
+    
+    # Find candidate by consent token
+    candidate = await candidatesCol.find_one({
+        "consentToken": token,
+        "consentTokenExpiry": {"$gt": datetime.utcnow().isoformat()}
+    })
+    
+    if not candidate:
+        raise HTTPException(404, "Invalid or expired consent token")
+    
+    # Check if consent already given
+    if candidate.get("consentAcknowledged") == True:
+        return {
+            "status": "ALREADY_CONSENTED",
+            "message": "Consent has already been provided for this verification",
+            "consentDate": candidate.get("consentDate")
+        }
+    
+    # Construct candidate name from firstName and lastName
+    candidate_name = f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip()
+    if not candidate_name:
+        candidate_name = candidate.get("email", "Unknown")
+    
+    return {
+        "candidateId": str(candidate["_id"]),
+        "candidateName": candidate_name,
+        "candidateEmail": candidate.get("email"),
+        "organizationName": candidate.get("organizationName"),
+        "verificationChecks": candidate.get("verificationChecksRequested", []),
+        "consentRequestedAt": candidate.get("consentRequestedAt"),
+        "consentRequestedBy": candidate.get("consentRequestedBy"),
+        "tokenExpiresAt": candidate.get("consentTokenExpiry"),
+        "status": "PENDING_CONSENT"
+    }
+
+
+# ------------------------------
+# Submit Consent (Public - No Auth Required)
+# ------------------------------
+@app.post("/public/verification-consent/{token}/submit")
+async def submitConsent(token: str, body: dict = Body(...)):
+    """
+    Submit consent response from candidate.
+    
+    Request Body:
+    {
+        "consentGiven": true,  // Required: true/false
+        "candidateSignature": "John Doe",  // Optional
+        "ipAddress": "192.168.1.1",  // Optional
+        "userAgent": "Mozilla/5.0..."  // Optional
+    }
+    """
+    
+    consent_given = body.get("consentGiven")
+    if consent_given is None:
+        raise HTTPException(400, "consentGiven field is required (true/false)")
+    
+    # Find candidate by consent token
+    candidate = await candidatesCol.find_one({
+        "consentToken": token,
+        "consentTokenExpiry": {"$gt": datetime.utcnow().isoformat()}
+    })
+    
+    if not candidate:
+        raise HTTPException(404, "Invalid or expired consent token")
+    
+    # Check if consent already given
+    if candidate.get("consentAcknowledged") == True:
+        return {
+            "status": "ALREADY_CONSENTED",
+            "message": "Consent has already been provided for this verification"
+        }
+    
+    consent_date = datetime.utcnow().isoformat()
+    
+    # Update candidate with consent response
+    update_data = {
+        "consentAcknowledged": consent_given,
+        "consentDate": consent_date,
+        "consentSubmittedAt": consent_date,
+        "updatedAt": consent_date
+    }
+    
+    # Clear consent token after submission
+    update_data["consentToken"] = None
+    update_data["consentTokenExpiry"] = None
+    
+    await candidatesCol.update_one(
+        {"_id": candidate["_id"]},
+        {"$set": update_data}
+    )
+    
+    # Log the consent submission
+    await logActivity(
+        {"email": "system", "role": "SYSTEM"},
+        "Verification Consent Submitted",
+        f"Candidate {candidate.get('email')} {'gave' if consent_given else 'denied'} consent for verification",
+        "Success"
+    )
+    
+    # Construct candidate name from firstName and lastName
+    candidate_name = f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip()
+    if not candidate_name:
+        candidate_name = candidate.get("email", "Unknown")
+    
+    if consent_given:
+        return {
+            "status": "CONSENT_GIVEN",
+            "message": "Thank you! Your consent has been recorded. Verification process can now begin.",
+            "consentDate": consent_date,
+            "candidateName": candidate_name
+        }
+    else:
+        return {
+            "status": "CONSENT_DENIED", 
+            "message": "Your response has been recorded. Verification process will not proceed without consent.",
+            "consentDate": consent_date,
+            "candidateName": candidate_name
+        }
+
+
+# ------------------------------
+# Check Consent Status (Internal)
+# ------------------------------
+@app.get("/secure/verification/{candidateId}/consent-status")
+async def getConsentStatus(candidateId: str, user: dict = Depends(requireAuth)):
+    """
+    Check consent status for a candidate (for internal use before starting verification).
+    """
+    
+    # Authorization check
+    if user.get("role") not in ["SUPER_ADMIN", "SUPER_SPOC", "ORG_HR", "SPOC", "SUPER_ADMIN_HELPER"]:
+        raise HTTPException(403, "Not authorized")
+    
+    # Validate candidate ID
+    try:
+        candidate_obj_id = ObjectId(candidateId)
+    except:
+        raise HTTPException(400, "Invalid candidate ID")
+    
+    # Fetch candidate
+    candidate = await candidatesCol.find_one({"_id": candidate_obj_id})
+    if not candidate:
+        raise HTTPException(404, "Candidate not found")
+    
+    # Check organization access (same logic as send consent)
+    candidate_org_id = str(candidate.get("organizationId", ""))
+    user_org_id = str(user.get("organizationId", ""))
+    user_role = user.get("role")
+    
+    has_access = False
+    if user_role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+        has_access = True
+    elif user_role == "SUPER_ADMIN_HELPER":
+        accessible_orgs = user.get("accessibleOrganizations", [])
+        has_access = candidate_org_id in [str(org) for org in accessible_orgs]
+    elif user_role in ["ORG_HR", "SPOC"]:
+        has_access = candidate_org_id == user_org_id
+    
+    if not has_access:
+        raise HTTPException(403, "Not authorized to access this candidate")
+    
+    # Determine consent status
+    consent_status = "NOT_REQUESTED"
+    if candidate.get("consentRequested"):
+        if candidate.get("consentAcknowledged") == True:
+            consent_status = "CONSENT_GIVEN"
+        elif candidate.get("consentAcknowledged") == False:
+            consent_status = "CONSENT_DENIED"
+        else:
+            # Check if token expired
+            token_expiry = candidate.get("consentTokenExpiry")
+            if token_expiry and datetime.fromisoformat(token_expiry) < datetime.utcnow():
+                consent_status = "TOKEN_EXPIRED"
+            else:
+                consent_status = "PENDING_CONSENT"
+    
+    # Construct candidate name from firstName and lastName
+    candidate_name = f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip()
+    if not candidate_name:
+        candidate_name = candidate.get("email", "Unknown")
+    
+    return {
+        "candidateId": candidateId,
+        "candidateName": candidate_name,
+        "candidateEmail": candidate.get("email"),
+        "consentStatus": consent_status,
+        "consentRequested": candidate.get("consentRequested", False),
+        "consentRequestedAt": candidate.get("consentRequestedAt"),
+        "consentRequestedBy": candidate.get("consentRequestedBy"),
+        "consentAcknowledged": candidate.get("consentAcknowledged"),
+        "consentDate": candidate.get("consentDate"),
+        "consentSignature": candidate.get("consentSignature"),
+        "verificationChecksRequested": candidate.get("verificationChecksRequested", []),
+        "canStartVerification": consent_status == "CONSENT_GIVEN"
+    }
 
 
 # ============================================================
