@@ -1503,6 +1503,23 @@ async def getVerifications(
     async for v in verifications_cursor:
         v["_id"] = str(v["_id"])
         v["candidateId"] = str(v["candidateId"])
+        
+        # 🔥 NEW: Add initiatedByName by looking up the user
+        initiated_by_email = v.get("initiatedBy")
+        initiated_by_name = "Unknown"
+        
+        if initiated_by_email:
+            try:
+                initiator_user = await usersCol.find_one({"email": initiated_by_email})
+                if initiator_user:
+                    initiated_by_name = initiator_user.get("userName", initiated_by_email)
+                else:
+                    initiated_by_name = initiated_by_email  # Fallback to email if user not found
+            except Exception as e:
+                print(f"Error looking up initiator {initiated_by_email}: {e}")
+                initiated_by_name = initiated_by_email
+        
+        v["initiatedByName"] = initiated_by_name
 
         totalChecks = completedChecks = failedChecks = inProgressChecks = 0
 
@@ -4947,6 +4964,9 @@ async def getConsentStatus(candidateId: str, user: dict = Depends(requireAuth)):
         "verificationChecksRequested": candidate.get("verificationChecksRequested", []),
         "canStartVerification": consent_status == "CONSENT_GIVEN"
     }
+
+
+# Removed duplicate verification overview endpoint - using existing /secure/getVerifications instead
 
 
 # ============================================================

@@ -5,7 +5,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
 
-FRONTEND_SELF_VERIFY_URL = "https://deserted-karla-soughfully.ngrok-free.dev/candidate/self-verification"
+FRONTEND_SELF_VERIFY_URL = "https://bgv-zfdw.onrender.com/candidate/self-verification"
 
 # SCOPES used for Gmail API
 SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
