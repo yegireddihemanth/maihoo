@@ -61,6 +61,7 @@ origins = [
     "https://maihoo.onrender.com",
     "https://bgv-zfdw.onrender.com",
     "https://deserted-karla-soughfully.ngrok-free.dev",
+    "https://bgv-ey1e.onrender.com"
     
 ]
 
