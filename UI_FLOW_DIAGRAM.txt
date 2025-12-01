@@ -1,0 +1,172 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    MANUAL VERIFICATION UI FLOW                               ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          1. VERIFICATION LIST PAGE                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+   API: GET /secure/getVerificationsByOrganization?organizationId=org_123
+
+   ┌────────────────────────────────────────────────────────────────────────┐
+   │  Manual Verifications                                    [Refresh]     │
+   ├────────────────────────────────────────────────────────────────────────┤
+   │                                                                         │
+   │  ┌──────────────────────────────────────────────────────────────────┐ │
+   │  │ 👤 John Doe                              [50% Complete]          │ │
+   │  │ Stage: Primary                           ████████░░░░░░░░        │ │
+   │  │ Status: IN_PROGRESS                      2/4 checks done         │ │
+   │  │                                          [View Details →]        │ │
+   │  └──────────────────────────────────────────────────────────────────┘ │
+   │                                                                         │
+   │  ┌──────────────────────────────────────────────────────────────────┐ │
+   │  │ 👤 Jane Smith                            [75% Complete]          │ │
+   │  │ Stage: Secondary                         ████████████░░░░        │ │
+   │  │ Status: IN_PROGRESS                      3/4 checks done         │ │
+   │  │                                          [View Details →]        │ │
+   │  └──────────────────────────────────────────────────────────────────┘ │
+   │                                                                         │
+   └────────────────────────────────────────────────────────────────────────┘
+
+                                      ↓ User clicks "View Details"
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        2. VERIFICATION DETAIL PAGE                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+   API: GET /secure/getVerificationById/ver_123
+
+   ┌────────────────────────────────────────────────────────────────────────┐
+   │  ← Back to List                                                        │
+   ├────────────────────────────────────────────────────────────────────────┤
+   │                                                                         │
+   │  Candidate: John Doe                                                   │
+   │  Email: john@example.com                                               │
+   │  Phone: 9876543210                                                     │
+   │  Stage: Primary                              [50% Complete]            │
+   │                                              ████████░░░░░░░░          │
+   │                                                                         │
+   ├────────────────────────────────────────────────────────────────────────┤
+   │  Verification Checks                                                   │
+   ├────────────────────────────────────────────────────────────────────────┤
+   │                                                                         │
+   │  ✅ PAN Verification                         [COMPLETED]               │
+   │     Remarks: PAN verified via API                                      │
+   │     Completed: Jan 15, 2024 10:30 AM                                   │
+   │                                                                         │
+   │  ✅ Aadhaar Verification                     [COMPLETED]               │
+   │     Remarks: Aadhaar verified via API                                  │
+   │     Completed: Jan 15, 2024 10:30 AM                                   │
+   │                                                                         │
+   │  ⏳ Address Verification                     [PENDING]                 │
+   │     [Mark as Complete]  ←─────────────────────────────────────────┐   │
+   │                                                                    │   │
+   │  ⏳ Education Check (Manual)                 [PENDING]            │   │
+   │     [Mark as Complete]                                            │   │
+   │                                                                    │   │
+   └────────────────────────────────────────────────────────────────────────┘
+                                                                         │
+                                      ↓ User clicks "Mark as Complete"  │
+                                                                         │
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          3. UPDATE CHECK MODAL                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+   ┌────────────────────────────────────────────────────────────────────────┐
+   │  Complete Check: Address Verification                          [X]     │
+   ├────────────────────────────────────────────────────────────────────────┤
+   │                                                                         │
+   │  Status: *                                                             │
+   │  ◉ COMPLETED                                                           │
+   │  ○ FAILED                                                              │
+   │  ○ IN_PROGRESS                                                         │
+   │                                                                         │
+   │  Remarks: *                                                            │
+   │  ┌──────────────────────────────────────────────────────────────────┐ │
+   │  │ Visited candidate's address on Jan 16, 2024.                    │ │
+   │  │ Confirmed residential address matches records.                  │ │
+   │  │ Verified with utility bill and landlord signature.              │ │
+   │  │ Address: 123 Main St, City, State 12345                         │ │
+   │  └──────────────────────────────────────────────────────────────────┘ │
+   │                                                                         │
+   │  Evidence (Optional):                                                  │
+   │  [📷 Upload Photo]  [📄 Upload Document]                              │
+   │                                                                         │
+   │                    [Cancel]              [Submit] ←───────────────┐   │
+   │                                                                    │   │
+   └────────────────────────────────────────────────────────────────────────┘
+                                                                         │
+                                      ↓ User clicks "Submit"            │
+                                                                         │
+   API: POST /secure/updateInternalVerification                         │
+   {                                                                     │
+     "verificationId": "ver_123",                                       │
+     "stage": "primary",                                                │
+     "checkName": "address_verification",                               │
+     "status": "COMPLETED",                                             │
+     "remarks": "Visited candidate's address..."                        │
+   }                                                                     │
+                                                                         │
+                                      ↓ API returns success             │
+                                                                         │
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    4. UPDATED VERIFICATION DETAIL PAGE                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+   ┌────────────────────────────────────────────────────────────────────────┐
+   │  ← Back to List                                                        │
+   ├────────────────────────────────────────────────────────────────────────┤
+   │                                                                         │
+   │  Candidate: John Doe                                                   │
+   │  Email: john@example.com                                               │
+   │  Phone: 9876543210                                                     │
+   │  Stage: Primary                              [75% Complete] ← Updated! │
+   │                                              ████████████░░░░          │
+   │                                                                         │
+   ├────────────────────────────────────────────────────────────────────────┤
+   │  Verification Checks                                                   │
+   ├────────────────────────────────────────────────────────────────────────┤
+   │                                                                         │
+   │  ✅ PAN Verification                         [COMPLETED]               │
+   │     Remarks: PAN verified via API                                      │
+   │     Completed: Jan 15, 2024 10:30 AM                                   │
+   │                                                                         │
+   │  ✅ Aadhaar Verification                     [COMPLETED]               │
+   │     Remarks: Aadhaar verified via API                                  │
+   │     Completed: Jan 15, 2024 10:30 AM                                   │
+   │                                                                         │
+   │  ✅ Address Verification                     [COMPLETED] ← Updated!    │
+   │     Remarks: Visited candidate's address on Jan 16, 2024...            │
+   │     Completed: Jan 16, 2024 2:45 PM                                    │
+   │                                                                         │
+   │  ⏳ Education Check (Manual)                 [PENDING]                 │
+   │     [Mark as Complete]                                                 │
+   │                                                                         │
+   └────────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+
+                            DATA FLOW SUMMARY
+
+┌─────────────┐         ┌─────────────┐         ┌─────────────┐
+│             │  GET    │             │  POST   │             │
+│  Frontend   │────────>│   Backend   │────────>│   MongoDB   │
+│     UI      │<────────│     API     │<────────│  Database   │
+│             │ Response│             │ Updated │             │
+└─────────────┘         └─────────────┘         └─────────────┘
+
+Step 1: UI calls GET /getVerificationsByOrganization
+        Backend returns list of verifications
+
+Step 2: UI calls GET /getVerificationById/{id}
+        Backend returns full verification details
+
+Step 3: User fills form and clicks Submit
+        UI calls POST /updateInternalVerification
+        Backend updates MongoDB
+        Backend returns success
+
+Step 4: UI refreshes data
+        Shows updated status and progress
+
+═══════════════════════════════════════════════════════════════════════════════

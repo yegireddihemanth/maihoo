@@ -1,0 +1,219 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    POSTMAN TESTING - QUICK REFERENCE                         ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STEP 0: LOGIN                                                               │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+POST /auth/login
+{
+  "email": "your-email@example.com",
+  "password": "your-password"
+}
+
+✅ Save token from response!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STEP 1: CREATE CANDIDATE                                                    │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+POST /secure/addCandidate
+Authorization: Bearer {{token}}
+{
+  "firstName": "John",
+  "lastName": "Doe",
+  "email": "john.doe@example.com",
+  "phone": "9876543210",
+  "panNumber": "ABCDE1234F",
+  "aadhaarNumber": "123456789012",
+  "address": "123 Main St, City, State",
+  "organizationId": "org_789"
+}
+
+✅ Save candidateId from response!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STEP 2: INITIATE VERIFICATION (Mixed Checks)                                │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+POST /secure/initiateStageVerification
+Authorization: Bearer {{token}}
+{
+  "candidateId": "{{candidateId}}",
+  "organizationId": "org_789",
+  "stages": {
+    "primary": [
+      "pan_verification",           // API
+      "aadhaar_verification",       // API
+      "address_verification",       // Manual
+      "education_check_manual"      // Manual
+    ]
+  }
+}
+
+✅ Save verificationId from response!
+📊 Progress: 0% (0/4 checks)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STEP 3: RUN API CHECKS                                                      │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+POST /secure/runStage
+Authorization: Bearer {{token}}
+{
+  "verificationId": "{{verificationId}}",
+  "stage": "primary"
+}
+
+⏱️  Takes ~5-10 seconds
+✅ API checks complete automatically
+📊 Progress: 50% (2/4 checks)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STEP 4: CHECK STATUS                                                        │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+GET /secure/getVerificationById/{{verificationId}}
+Authorization: Bearer {{token}}
+
+Expected:
+✅ pan_verification: COMPLETED
+✅ aadhaar_verification: COMPLETED
+⏳ address_verification: PENDING
+⏳ education_check_manual: PENDING
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STEP 5: UPDATE MANUAL CHECK #1 (Address)                                    │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+POST /secure/updateInternalVerification
+Authorization: Bearer {{token}}
+{
+  "verificationId": "{{verificationId}}",
+  "stage": "primary",
+  "checkName": "address_verification",
+  "status": "COMPLETED",
+  "remarks": "Visited candidate's address on Jan 16, 2024. Confirmed residential address matches records. Verified with utility bill."
+}
+
+✅ Address check complete
+📊 Progress: 75% (3/4 checks)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STEP 6: UPDATE MANUAL CHECK #2 (Education)                                  │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+POST /secure/updateInternalVerification
+Authorization: Bearer {{token}}
+{
+  "verificationId": "{{verificationId}}",
+  "stage": "primary",
+  "checkName": "education_check_manual",
+  "status": "COMPLETED",
+  "remarks": "Called ABC University on Jan 17, 2024. Confirmed: Degree: BSc, Year: 2020, Status: Graduated."
+}
+
+✅ Education check complete
+📊 Progress: 100% (4/4 checks)
+🎉 PRIMARY STAGE COMPLETED!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STEP 7: VERIFY FINAL STATUS                                                 │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+GET /secure/getVerificationById/{{verificationId}}
+Authorization: Bearer {{token}}
+
+Expected:
+✅ pan_verification: COMPLETED
+✅ aadhaar_verification: COMPLETED
+✅ address_verification: COMPLETED
+✅ education_check_manual: COMPLETED
+
+Progress: 100% ✅
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         ENVIRONMENT VARIABLES                                ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+Create these in Postman Environment:
+
+base_url          = https://your-api-domain.com
+auth_token        = (auto-saved from login)
+organizationId    = (auto-saved from login)
+candidateId       = (auto-saved from create candidate)
+verificationId    = (auto-saved from initiate verification)
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         AUTO-SAVE SCRIPTS                                    ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+Add to "Tests" tab in each request:
+
+Login:
+  pm.environment.set("auth_token", pm.response.json().token);
+  pm.environment.set("organizationId", pm.response.json().organizationId);
+
+Create Candidate:
+  pm.environment.set("candidateId", pm.response.json().candidateId);
+
+Initiate Verification:
+  pm.environment.set("verificationId", pm.response.json().verificationId);
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         TESTING CHECKLIST                                    ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+[ ] Step 0: Login successful, token saved
+[ ] Step 1: Candidate created, ID saved
+[ ] Step 2: Verification initiated, ID saved
+[ ] Step 3: API checks run, 50% complete
+[ ] Step 4: Status checked, 2 checks completed
+[ ] Step 5: Manual check #1 updated, 75% complete
+[ ] Step 6: Manual check #2 updated, 100% complete
+[ ] Step 7: Final status verified, all checks completed
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         COMMON ISSUES                                        ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+❌ "No session cookie"
+   → Add: Authorization: Bearer {{auth_token}}
+
+❌ "Candidate not found"
+   → Check candidateId is correct
+
+❌ "Verification not found"
+   → Check verificationId is correct
+
+❌ "Missing required field"
+   → Ensure candidate has panNumber, aadhaarNumber, etc.
+
+❌ "Check already completed"
+   → Can't update COMPLETED checks
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         QUICK TIPS                                           ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+✅ Use {{variables}} for dynamic values
+✅ Add auto-save scripts in Tests tab
+✅ Check status after each step
+✅ Save collection for reuse
+✅ Test error cases too
+

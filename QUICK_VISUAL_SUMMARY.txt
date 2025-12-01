@@ -1,0 +1,279 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║           COMPLETE VERIFICATION FLOW - VISUAL SUMMARY                        ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STEP 1: CREATE CANDIDATE                                                    │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+   UI: HR fills form → Clicks "Add Candidate"
+   
+   API: POST /secure/addCandidate
+   
+   Result: candidateId = "cand_456"
+           status = "PENDING"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STEP 2: INITIATE VERIFICATION (Mixed: API + Manual)                         │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+   UI: HR selects checks:
+       [x] PAN Verification (API)
+       [x] Aadhaar Verification (API)
+       [x] Address Verification (Manual)
+       [x] Education Check (Manual)
+       
+       Clicks "Start Verification"
+   
+   API: POST /secure/initiateStageVerification
+        {
+          "candidateId": "cand_456",
+          "stages": {
+            "primary": [
+              "pan_verification",        // API
+              "aadhaar_verification",    // API
+              "address_verification",    // Manual
+              "education_check_manual"   // Manual
+            ]
+          }
+        }
+   
+   Result: verificationId = "ver_123"
+   
+   Database:
+   ┌────────────────────────────────────────────────────┐
+   │ Check                      Status      Type        │
+   ├────────────────────────────────────────────────────┤
+   │ pan_verification           PENDING     API         │
+   │ aadhaar_verification       PENDING     API         │
+   │ address_verification       PENDING     Manual      │
+   │ education_check_manual     PENDING     Manual      │
+   └────────────────────────────────────────────────────┘
+   
+   Progress: 0% (0/4 completed)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STEP 3: RUN API CHECKS (Automatic)                                          │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+   UI: HR clicks "Run API Checks"
+   
+   API: POST /secure/runStage
+        {
+          "verificationId": "ver_123",
+          "stage": "primary"
+        }
+   
+   Backend Process:
+   ┌─────────────────────────────────────────────────────────────┐
+   │ Loop through all checks in "primary" stage:                 │
+   │                                                              │
+   │ 1. pan_verification (API)                                   │
+   │    ├─ Call Surepass PAN API                                │
+   │    ├─ Get result: COMPLETED                                │
+   │    └─ Update database ✅                                    │
+   │                                                              │
+   │ 2. aadhaar_verification (API)                               │
+   │    ├─ Call Surepass Aadhaar API                            │
+   │    ├─ Get result: COMPLETED                                │
+   │    └─ Update database ✅                                    │
+   │                                                              │
+   │ 3. address_verification (Manual)                            │
+   │    ├─ Check if it's API-based: NO                          │
+   │    ├─ Skip (leave as PENDING)                              │
+   │    └─ Wait for manual update ⏳                             │
+   │                                                              │
+   │ 4. education_check_manual (Manual)                          │
+   │    ├─ Check if it's API-based: NO                          │
+   │    ├─ Skip (leave as PENDING)                              │
+   │    └─ Wait for manual update ⏳                             │
+   └─────────────────────────────────────────────────────────────┘
+   
+   Database After:
+   ┌────────────────────────────────────────────────────┐
+   │ Check                      Status      Type        │
+   ├────────────────────────────────────────────────────┤
+   │ pan_verification           ✅ COMPLETED  API       │
+   │ aadhaar_verification       ✅ COMPLETED  API       │
+   │ address_verification       ⏳ PENDING    Manual    │
+   │ education_check_manual     ⏳ PENDING    Manual    │
+   └────────────────────────────────────────────────────┘
+   
+   Progress: 50% (2/4 completed)
+   
+   Time Taken: ~5 seconds (API calls are fast!)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STEP 4: COMPLETE MANUAL CHECK #1 (Address)                                  │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+   Real World: Field agent visits candidate's address (takes 1 day)
+   
+   UI: Agent opens verification → Clicks "Mark as Complete"
+       
+       Modal opens:
+       ┌─────────────────────────────────────────────────┐
+       │ Status: ◉ COMPLETED                             │
+       │                                                  │
+       │ Remarks:                                         │
+       │ ┌──────────────────────────────────────────────┐│
+       │ │ Visited address on Jan 16.                  ││
+       │ │ Confirmed with utility bill.                ││
+       │ │ Address matches records.                    ││
+       │ └──────────────────────────────────────────────┘│
+       │                                                  │
+       │         [Cancel]         [Submit]               │
+       └─────────────────────────────────────────────────┘
+   
+   API: POST /secure/updateInternalVerification
+        {
+          "verificationId": "ver_123",
+          "stage": "primary",
+          "checkName": "address_verification",
+          "status": "COMPLETED",
+          "remarks": "Visited address on Jan 16..."
+        }
+   
+   Database After:
+   ┌────────────────────────────────────────────────────┐
+   │ Check                      Status      Type        │
+   ├────────────────────────────────────────────────────┤
+   │ pan_verification           ✅ COMPLETED  API       │
+   │ aadhaar_verification       ✅ COMPLETED  API       │
+   │ address_verification       ✅ COMPLETED  Manual    │
+   │ education_check_manual     ⏳ PENDING    Manual    │
+   └────────────────────────────────────────────────────┘
+   
+   Progress: 75% (3/4 completed)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STEP 5: COMPLETE MANUAL CHECK #2 (Education)                                │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+   Real World: HR calls university (takes 1 day)
+   
+   UI: HR opens verification → Clicks "Mark as Complete"
+       
+       Modal opens:
+       ┌─────────────────────────────────────────────────┐
+       │ Status: ◉ COMPLETED                             │
+       │                                                  │
+       │ Remarks:                                         │
+       │ ┌──────────────────────────────────────────────┐│
+       │ │ Called ABC University on Jan 17.            ││
+       │ │ Confirmed degree: BSc 2020                  ││
+       │ │ Spoke with Registrar Office.                ││
+       │ └──────────────────────────────────────────────┘│
+       │                                                  │
+       │         [Cancel]         [Submit]               │
+       └─────────────────────────────────────────────────┘
+   
+   API: POST /secure/updateInternalVerification
+        {
+          "verificationId": "ver_123",
+          "stage": "primary",
+          "checkName": "education_check_manual",
+          "status": "COMPLETED",
+          "remarks": "Called ABC University..."
+        }
+   
+   Database After:
+   ┌────────────────────────────────────────────────────┐
+   │ Check                      Status      Type        │
+   ├────────────────────────────────────────────────────┤
+   │ pan_verification           ✅ COMPLETED  API       │
+   │ aadhaar_verification       ✅ COMPLETED  API       │
+   │ address_verification       ✅ COMPLETED  Manual    │
+   │ education_check_manual     ✅ COMPLETED  Manual    │
+   └────────────────────────────────────────────────────┘
+   
+   Progress: 100% (4/4 completed)
+   
+   🎉 PRIMARY STAGE COMPLETED!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                              SUMMARY                                         ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  API CHECKS (Automatic)                                                      │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  • Triggered by: POST /secure/runStage                                       │
+│  • Execution: Automatic (backend calls APIs)                                 │
+│  • Time: Seconds                                                             │
+│  • Examples: PAN, Aadhaar, Employment, Credit, Court                         │
+│  • Updates: Automatic                                                        │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  MANUAL CHECKS (Human)                                                       │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  • Triggered by: POST /secure/updateInternalVerification                     │
+│  • Execution: Manual (human does work)                                       │
+│  • Time: Hours/Days                                                          │
+│  • Examples: Address visit, Education call, Reference check                  │
+│  • Updates: Manual (via UI form)                                             │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  MIXED STAGE (Both API + Manual)                                             │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  1. Initiate verification with all checks                                    │
+│  2. Run API checks first (fast)                                              │
+│  3. Complete manual checks later (slow)                                      │
+│  4. Progress updates in real-time                                            │
+│  5. Stage completes when ALL checks done                                     │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         3 KEY API CALLS                                      ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+1️⃣  INITIATE (Create verification with checks)
+    POST /secure/initiateStageVerification
+    {
+      "candidateId": "cand_456",
+      "stages": {
+        "primary": ["pan_verification", "address_verification", ...]
+      }
+    }
+
+2️⃣  RUN API CHECKS (Execute automatic checks)
+    POST /secure/runStage
+    {
+      "verificationId": "ver_123",
+      "stage": "primary"
+    }
+
+3️⃣  UPDATE MANUAL CHECK (Mark as complete)
+    POST /secure/updateInternalVerification
+    {
+      "verificationId": "ver_123",
+      "stage": "primary",
+      "checkName": "address_verification",
+      "status": "COMPLETED",
+      "remarks": "Detailed notes..."
+    }
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                            TIMELINE                                          ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+Day 1, 10:00 AM  →  Create candidate
+Day 1, 10:15 AM  →  Initiate verification (0%)
+Day 1, 10:20 AM  →  Run API checks (50% in 5 seconds!)
+Day 2, 2:45 PM   →  Complete address check (75%)
+Day 3, 11:20 AM  →  Complete education check (100%) ✅
+
+Total Time: 3 days (but API checks done in 5 seconds!)
+
