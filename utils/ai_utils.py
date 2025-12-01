@@ -257,3 +257,67 @@ async def llm_resume_validator(extractedText: str):
             "issues": [f"Model error: {str(e)}"],
             "explanation": "Could not analyze resume"
         }
+
+
+# ---------------------------------------------------
+# LLM Education Certificate Validator
+# ---------------------------------------------------
+async def llm_education_validator(extractedText: str, candidate: dict):
+    """
+    Validates education certificate using LLM
+    """
+    from ollama import Client
+    client = Client()
+
+    candidateName = f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip()
+    
+    prompt = f"""
+    You are an expert education certificate validator.
+
+    Analyze the following education certificate text for candidate: {candidateName}
+
+    Check for:
+    - Valid institution name and accreditation
+    - Proper certificate format and structure
+    - Consistent dates and academic years
+    - Authentic looking signatures and seals
+    - Matching candidate name (case-insensitive)
+    - Valid degree/course information
+    - Suspicious or fake patterns
+
+    Return ONLY this JSON:
+    {{
+        "status": "VALID" or "INVALID",
+        "institutionName": "extracted institution name",
+        "degreeName": "extracted degree/course name",
+        "graduationYear": "extracted year",
+        "candidateNameMatch": true/false,
+        "issues": [...],
+        "explanation": "detailed analysis"
+    }}
+
+    Certificate Text:
+    {extractedText}
+    """
+
+    try:
+        res = client.chat(
+            model="llama3.2",
+            messages=[{"role": "user", "content": prompt}],
+            format="json"
+        )
+
+        raw = res["message"]["content"]
+        import json
+        return json.loads(raw)
+
+    except Exception as e:
+        return {
+            "status": "INVALID",
+            "institutionName": "",
+            "degreeName": "",
+            "graduationYear": "",
+            "candidateNameMatch": False,
+            "issues": [f"Model error: {str(e)}"],
+            "explanation": "Could not analyze education certificate"
+        }

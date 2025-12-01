@@ -4679,11 +4679,29 @@ async def sendVerificationConsent(
     if not has_access:
         raise HTTPException(403, "Not authorized to access this candidate")
     
-    # Get request data
+    # Get request data - verification checks are now optional
     verification_checks = body.get("verificationChecks", [])
     
+    # If no checks provided, use default verification checks
     if not verification_checks:
-        raise HTTPException(400, "Verification checks list is required")
+        verification_checks = [
+            {
+                "name": "Identity Verification",
+                "description": "Verify identity documents and personal information"
+            },
+            {
+                "name": "Employment Verification", 
+                "description": "Verify employment history and job titles"
+            },
+            {
+                "name": "Education Verification",
+                "description": "Verify educational qualifications and degrees"
+            },
+            {
+                "name": "Reference Check",
+                "description": "Contact provided references to verify character and work performance"
+            }
+        ]
     
     # Check if consent already given
     if candidate.get("consentAcknowledged") == True:
@@ -5905,3 +5923,326 @@ async def getAvailableAssignees(ticketId: str, user: dict = Depends(requireAuth)
         "organizationId": ticketOrgId,
         "organizationName": ticket.get("organizationName", "Unknown")
     }
+
+# ---------------------------------------------------
+# 📌 Internal Verification Endpoints
+# ---------------------------------------------------
+
+@app.post("/secure/updateInternalVerification")
+async def updateInternalVerification(body: dict = Body(...), user: dict = Depends(requireAuth)):
+    """
+    Update internal verification check status manually through UI
+    
+    Body:
+    {
+        "verificationId": "...",
+        "stage": "primary|secondary|final",
+        "checkName": "address_verification|education_check_manual|supervisory_check|employment_history_manual",
+        "status": "COMPLETED|FAILED",
+        "remarks": "manual verification notes",
+        "attachments": [...] // optional
+    }
+    """
+    
+    verificationId = body.get("verificationId")
+    stage = body.get("stage")
+    checkName = body.get("checkName")
+    status = body.get("status")
+    remarks = body.get("remarks", "")
+    attachments = body.get("attachments", [])
+    
+    if not all([verificationId, stage, checkName, status]):
+        raise HTTPException(status_code=400, detail="verificationId, stage, checkName, and status are required")
+    
+    if status not in ["COMPLETED", "FAILED"]:
+        raise HTTPException(status_code=400, detail="Status must be COMPLETED or FAILED")
+    
+    # Internal verification checks that can be manually updated
+    internal_checks = [
+        "address_verification",
+        "education_check_manual", 
+        "supervisory_check",
+        "employment_history_manual"
+    ]
+    
+    if checkName not in internal_checks:
+        raise HTTPException(status_code=400, detail=f"Check {checkName} is not an internal verification check")
+    
+    # Validate verificationId
+    try:
+        verObjId = ObjectId(verificationId)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid verificationId")
+    
+    ver = await verificationsCol.find_one({"_id": verObjId})
+    if not ver:
+        raise HTTPException(status_code=404, detail="Verification not found")
+    
+    verificationOrgId = str(ver.get("organizationId"))
+    candidateId = ver.get("candidateId")
+    
+    # Role-based access control
+    role = user.get("role")
+    userEmail = user.get("email", "").lower().strip()
+    userOrgId = str(user.get("organizationId"))
+    accessible = [str(x) for x in user.get("accessibleOrganizations", [])]
+    
+    allowed = False
+    
+    if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+        allowed = True
+    elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
+        allowed = True
+    elif role == "SUPER_ADMIN_HELPER":
+        if verificationOrgId in accessible:
+            allowed = True
+    elif role in ["ORG_HR", "SPOC"]:
+        if verificationOrgId == userOrgId:
+            allowed = True
+    elif role == "HELPER":
+        if verificationOrgId == userOrgId:
+            # Check if user created the candidate or is assigned to verification
+            candidate = await candidatesCol.find_one({"_id": ObjectId(candidateId)})
+            if (candidate and candidate.get("createdBy", "").lower().strip() == userEmail) or \
+               str(ver.get("assignedTo")) == str(user.get("_id")):
+                allowed = True
+    
+    if not allowed:
+        raise HTTPException(status_code=403, detail="You are not authorized to update this verification")
+    
+    # Find and update the specific check
+    stages = ver.get("stages", {})
+    stageChecks = stages.get(stage, [])
+    
+    checkFound = False
+    for i, check in enumerate(stageChecks):
+        if isinstance(check, dict) and check.get("check") == checkName:
+            # Update the check
+            stageChecks[i]["status"] = status
+            stageChecks[i]["remarks"] = remarks
+            stageChecks[i]["submittedAt"] = datetime.now(timezone.utc).isoformat()
+            stageChecks[i]["updatedBy"] = userEmail
+            if attachments:
+                stageChecks[i]["attachments"] = attachments
+            checkFound = True
+            break
+    
+    if not checkFound:
+        raise HTTPException(status_code=404, detail=f"Check {checkName} not found in stage {stage}")
+    
+    # Update the verification document
+    await verificationsCol.update_one(
+        {"_id": verObjId},
+        {"$set": {f"stages.{stage}": stageChecks}}
+    )
+    
+    # Log activity
+    await logActivity(
+        user,
+        "Internal Verification Updated",
+        f"Updated {checkName} in {stage} stage to {status}",
+        "Success"
+    )
+    
+    return JSONResponse(
+        status_code=200,
+        content={
+            "message": f"Internal verification {checkName} updated successfully",
+            "verificationId": verificationId,
+            "stage": stage,
+            "checkName": checkName,
+            "status": status,
+            "updatedBy": userEmail,
+            "updatedAt": datetime.now(timezone.utc).isoformat()
+        }
+    )
+
+
+@app.get("/secure/getInternalVerificationDetails/{verificationId}")
+async def getInternalVerificationDetails(verificationId: str, user: dict = Depends(requireAuth)):
+    """
+    Get details of internal verification checks for manual review
+    """
+    
+    try:
+        verObjId = ObjectId(verificationId)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid verificationId")
+    
+    ver = await verificationsCol.find_one({"_id": verObjId})
+    if not ver:
+        raise HTTPException(status_code=404, detail="Verification not found")
+    
+    verificationOrgId = str(ver.get("organizationId"))
+    candidateId = ver.get("candidateId")
+    
+    # Role-based access control (same as update endpoint)
+    role = user.get("role")
+    userEmail = user.get("email", "").lower().strip()
+    userOrgId = str(user.get("organizationId"))
+    accessible = [str(x) for x in user.get("accessibleOrganizations", [])]
+    
+    allowed = False
+    
+    if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+        allowed = True
+    elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
+        allowed = True
+    elif role == "SUPER_ADMIN_HELPER":
+        if verificationOrgId in accessible:
+            allowed = True
+    elif role in ["ORG_HR", "SPOC"]:
+        if verificationOrgId == userOrgId:
+            allowed = True
+    elif role == "HELPER":
+        if verificationOrgId == userOrgId:
+            candidate = await candidatesCol.find_one({"_id": ObjectId(candidateId)})
+            if (candidate and candidate.get("createdBy", "").lower().strip() == userEmail) or \
+               str(ver.get("assignedTo")) == str(user.get("_id")):
+                allowed = True
+    
+    if not allowed:
+        raise HTTPException(status_code=403, detail="You are not authorized to view this verification")
+    
+    # Get candidate details
+    candidate = await candidatesCol.find_one({"_id": ObjectId(candidateId)})
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    
+    # Extract internal verification checks
+    internal_checks = [
+        "address_verification",
+        "education_check_manual", 
+        "education_check_ai",
+        "supervisory_check",
+        "employment_history_manual"
+    ]
+    
+    internalVerifications = {}
+    
+    for stageName, checks in ver.get("stages", {}).items():
+        stageInternals = []
+        for check in checks:
+            if isinstance(check, dict):
+                checkName = check.get("check")
+                if checkName in internal_checks:
+                    stageInternals.append({
+                        "checkName": checkName,
+                        "status": check.get("status", "NOT_STARTED"),
+                        "remarks": check.get("remarks", ""),
+                        "submittedAt": check.get("submittedAt"),
+                        "updatedBy": check.get("updatedBy"),
+                        "attachments": check.get("attachments", []),
+                        "requiresManualVerification": checkName != "education_check_ai"
+                    })
+        
+        if stageInternals:
+            internalVerifications[stageName] = stageInternals
+    
+    return JSONResponse(
+        status_code=200,
+        content=jsonable_encoder({
+            "verificationId": verificationId,
+            "candidateId": candidateId,
+            "candidateDetails": {
+                "name": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
+                "email": candidate.get("email"),
+                "phone": candidate.get("phone"),
+                "address": candidate.get("address"),
+                "district": candidate.get("district"),
+                "state": candidate.get("state"),
+                "pincode": candidate.get("pincode")
+            },
+            "organizationId": verificationOrgId,
+            "organizationName": ver.get("organizationName"),
+            "overallStatus": ver.get("overallStatus"),
+            "currentStage": ver.get("currentStage"),
+            "internalVerifications": internalVerifications
+        })
+    )
+
+
+@app.post("/secure/uploadEducationCertificate")
+async def uploadEducationCertificate(
+    candidateId: str = Form(...),
+    file: UploadFile = File(...),
+    user: dict = Depends(requireAuth)
+):
+    """
+    Upload education certificate for AI verification
+    """
+    
+    if not file.filename.lower().endswith(('.pdf', '.docx')):
+        raise HTTPException(status_code=400, detail="Only PDF and DOCX files are allowed")
+    
+    try:
+        candidateObjId = ObjectId(candidateId)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid candidateId")
+    
+    candidate = await candidatesCol.find_one({"_id": candidateObjId})
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    
+    candidateOrgId = str(candidate.get("organizationId"))
+    
+    # Role-based access control
+    role = user.get("role")
+    userEmail = user.get("email", "").lower().strip()
+    userOrgId = str(user.get("organizationId"))
+    accessible = [str(x) for x in user.get("accessibleOrganizations", [])]
+    
+    allowed = False
+    
+    if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+        allowed = True
+    elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
+        allowed = True
+    elif role == "SUPER_ADMIN_HELPER":
+        if candidateOrgId in accessible:
+            allowed = True
+    elif role in ["ORG_HR", "SPOC"]:
+        if candidateOrgId == userOrgId:
+            allowed = True
+    elif role == "HELPER":
+        if candidateOrgId == userOrgId and candidate.get("createdBy", "").lower().strip() == userEmail:
+            allowed = True
+    
+    if not allowed:
+        raise HTTPException(status_code=403, detail="You are not authorized to upload files for this candidate")
+    
+    # Save file (you may want to implement proper file storage)
+    import os
+    upload_dir = "uploads/education_certificates"
+    os.makedirs(upload_dir, exist_ok=True)
+    
+    file_extension = file.filename.split('.')[-1]
+    filename = f"{candidateId}_education_cert_{int(datetime.now().timestamp())}.{file_extension}"
+    file_path = os.path.join(upload_dir, filename)
+    
+    with open(file_path, "wb") as buffer:
+        content = await file.read()
+        buffer.write(content)
+    
+    # Update candidate with certificate path
+    await candidatesCol.update_one(
+        {"_id": candidateObjId},
+        {"$set": {"educationCertificatePath": file_path}}
+    )
+    
+    await logActivity(
+        user,
+        "Education Certificate Uploaded",
+        f"Uploaded certificate for candidate {candidateId}",
+        "Success"
+    )
+    
+    return JSONResponse(
+        status_code=200,
+        content={
+            "message": "Education certificate uploaded successfully",
+            "candidateId": candidateId,
+            "filename": filename,
+            "filePath": file_path
+        }
+    )

@@ -160,6 +160,106 @@ async def verify_court_record(candidate: dict):
 
 
 # ---------------------------------------------------
+# 📌 Internal Verification Functions (Manual/AI)
+# ---------------------------------------------------
+async def verify_address_manual(candidate: dict):
+    """
+    Internal address verification - manual check only
+    Returns PENDING status as this requires manual verification through UI
+    """
+    return "PENDING", {
+        "message": "Address verification pending manual review",
+        "candidateAddress": candidate.get("address", ""),
+        "district": candidate.get("district", ""),
+        "state": candidate.get("state", ""),
+        "pincode": candidate.get("pincode", ""),
+        "requiresManualVerification": True
+    }
+
+async def verify_education_manual(candidate: dict):
+    """
+    Education check manual offline - requires manual research and verification
+    Returns PENDING status as this requires manual verification through UI
+    """
+    return "PENDING", {
+        "message": "Education verification pending manual offline research",
+        "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
+        "requiresManualVerification": True,
+        "instructions": "Manually verify education credentials through institution contact or online verification"
+    }
+
+async def verify_education_ai(candidate: dict):
+    """
+    Education check AI - OCR/PDF extraction + LLM validation
+    Processes education certificates using AI
+    """
+    from utils.ai_utils import extract_text_from_pdf, extract_text_from_docx, llm_education_validator
+    
+    # Look for education certificate path (you may need to add this field to candidate schema)
+    educationCertPath = candidate.get("educationCertificatePath")
+    if not educationCertPath:
+        return "FAILED", "Education certificate not uploaded"
+
+    ext = educationCertPath.split(".")[-1].lower()
+
+    try:
+        # Extract text from certificate
+        if ext == "pdf":
+            extractedText = extract_text_from_pdf(educationCertPath)
+        elif ext == "docx":
+            extractedText = extract_text_from_docx(educationCertPath)
+        else:
+            return "FAILED", f"Unsupported certificate file type: {ext}"
+
+        if not extractedText or len(extractedText.strip()) < 20:
+            return "FAILED", "Could not extract meaningful text from certificate"
+
+        # Validate using LLM (you'll need to implement this in ai_utils.py)
+        validation = await llm_education_validator(extractedText, candidate)
+
+        if validation.get("status") == "VALID":
+            return "COMPLETED", {
+                "message": "Education certificate validation passed",
+                "details": validation,
+                "extractedText": extractedText[:500] + "..." if len(extractedText) > 500 else extractedText
+            }
+        else:
+            return "FAILED", {
+                "message": "Education certificate validation failed",
+                "details": validation,
+                "extractedText": extractedText[:500] + "..." if len(extractedText) > 500 else extractedText
+            }
+
+    except Exception as e:
+        return "FAILED", f"Education AI validation error: {str(e)}"
+
+async def verify_supervisory_check(candidate: dict):
+    """
+    Supervisory check - manual phone call to past organization
+    Returns PENDING status as this requires manual phone verification
+    """
+    return "PENDING", {
+        "message": "Supervisory check pending manual phone verification",
+        "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
+        "candidatePhone": candidate.get("phone", ""),
+        "requiresManualVerification": True,
+        "instructions": "Contact candidate's previous organization for employment verification via phone call"
+    }
+
+async def verify_employment_history_manual(candidate: dict):
+    """
+    Employment history manual offline verification
+    Returns PENDING status as this requires manual verification through UI
+    """
+    return "PENDING", {
+        "message": "Employment history verification pending manual offline check",
+        "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
+        "requiresManualVerification": True,
+        "instructions": "Manually verify employment history through previous employers, documents, or references"
+    }
+
+
+# ---------------------------------------------------
 # 📌 Dispatcher (FULL — ONLY FIXED pan_aadhaar)
 # ---------------------------------------------------
 def validate_fields(check_type, candidate):
@@ -170,8 +270,14 @@ def validate_fields(check_type, candidate):
         "verify_pan_to_uan": ["panNumber"],
         "credit_report": ["phone", "panNumber", "firstName", "lastName"],
         "court_record": ["firstName", "lastName", "address"],
-        "resume_validation": ["resumePath"]  # resume must already be uploaded
-
+        "resume_validation": ["resumePath"],  # resume must already be uploaded
+        
+        # Internal verification checks
+        "address_verification": ["address"],  # basic address required
+        "education_check_manual": ["firstName", "lastName"],  # basic name required
+        "education_check_ai": ["educationCertificatePath"],  # certificate file required
+        "supervisory_check": ["firstName", "lastName"],  # basic name required
+        "employment_history_manual": ["firstName", "lastName"]  # basic name required
     }
 
     fields = required.get(check_type, [])
@@ -211,9 +317,22 @@ async def run_verification(check_type: str, candidate: dict):
     
     if check_type == "resume_validation":
         return await verify_resume_validation(candidate)
-
-
-
+    
+    # Internal verification checks
+    if check_type == "address_verification":
+        return await verify_address_manual(candidate)
+    
+    if check_type == "education_check_manual":
+        return await verify_education_manual(candidate)
+    
+    if check_type == "education_check_ai":
+        return await verify_education_ai(candidate)
+    
+    if check_type == "supervisory_check":
+        return await verify_supervisory_check(candidate)
+    
+    if check_type == "employment_history_manual":
+        return await verify_employment_history_manual(candidate)
 
     return "FAILED", f"Unknown check type: {check_type}"
     

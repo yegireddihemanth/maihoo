@@ -33,25 +33,24 @@ Content-Type: application/json
     {
       "name": "Criminal Background Check",
       "description": "Check for any criminal records or legal issues"
-    },
-    {
-      "name": "Reference Check",
-      "description": "Contact provided references to verify character and work performance"
-    },
-    {
-      "name": "Identity Verification",
-      "description": "Verify identity documents and personal information"
     }
   ]
 }
 ```
 
+**Or send empty request for default checks:**
+```json
+{}
+```
+
 ### **Field Validation:**
-- `verificationChecks` (array, required): Must contain at least 1 check
-  - `name` (string, required): Max 100 characters
+- `verificationChecks` (array, optional): List of verification checks to be performed
+  - `name` (string, required): Max 100 characters  
   - `description` (string, optional): Max 500 characters
 
-**Note**: The consent URL is configured in the backend code and doesn't need to be passed in the request.
+**Note**: 
+- The consent URL is configured in the backend code and doesn't need to be passed in the request.
+- If `verificationChecks` is not provided or empty, default verification checks will be used automatically.
 
 ### **Success Response (200):**
 ```json
