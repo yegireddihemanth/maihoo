@@ -17,3 +17,5 @@ sentence-transformers
 cloudinary
 aiohttp
 ollama
+openai
+boto3

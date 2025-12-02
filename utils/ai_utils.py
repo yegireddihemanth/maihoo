@@ -1,9 +1,8 @@
-# AI Utilities - CV Validation with OpenAI
+# AI Utilities - CV Authenticity Validation with OpenAI
 import PyPDF2
 import docx
 import uuid
 from datetime import datetime
-from pymongo import MongoClient
 import re
 import json
 import os
@@ -18,7 +17,7 @@ except ImportError:
     print("⚠️ OpenAI not installed. Install with: pip install openai")
 
 # Initialize OpenAI client
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "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")
 if OPENAI_API_KEY and OPENAI_AVAILABLE:
     openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
 else:
@@ -65,380 +64,198 @@ def extract_text_from_txt(file_obj):
         return ""
 
 # ------------------------------------------------
-# AI CV VALIDATION WITH OPENAI
+# AI CV AUTHENTICITY VALIDATION (NO JD REQUIRED)
 # ------------------------------------------------
 
-async def extract_structured_cv_data(cv_text: str) -> Dict:
-    """Extract structured data from CV using OpenAI GPT-4o mini"""
+async def validate_cv_authenticity(cv_text: str, has_uan: bool = False, candidate_type: str = "UNKNOWN", uan_note: str = "") -> Dict:
+    """
+    Validate CV authenticity - check for abnormalities, education overlaps, inconsistencies
+    NO JD comparison - pure authenticity check
+    
+    Parameters:
+    - cv_text: Extracted text from CV
+    - has_uan: Boolean - whether candidate has verified UAN (formal employment)
+    - candidate_type: "FRESHER", "EXPERIENCED_WITH_UAN", "EXPERIENCED_NO_UAN", "UNKNOWN"
+    - uan_note: Note about UAN verification status
+    
+    Returns:
+    - Positive findings (strengths, valid points)
+    - Negative findings (red flags, inconsistencies, overlaps)
+    - Authenticity score (0-100)
+    """
     if not openai_client:
         raise Exception("OpenAI client not configured")
     
     try:
-        response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an expert HR analyst. Extract structured information from CVs/resumes in a comprehensive format."
-                },
-                {
-                    "role": "user",
-                    "content": f"""Extract comprehensive information from this CV/Resume:
+        # Build context with UAN verification status
+        context_info = f"Candidate Type: {candidate_type}\n"
+        context_info += f"UAN Verification: {uan_note}\n\n"
+        
+        if has_uan:
+            context_info += "✅ IMPORTANT: Candidate has verified UAN number (Universal Account Number from EPFO).\n"
+            context_info += "This means they have formal employment history with provident fund contributions.\n"
+            context_info += "This significantly increases credibility and authenticity of employment claims.\n\n"
+        else:
+            context_info += "⚠️ NOTE: Candidate has NO UAN number.\n"
+            context_info += "This could mean: fresher, freelancer, worked in unorganized sector, or foreign employment.\n"
+            context_info += "Employment claims cannot be verified through official EPFO records.\n\n"
+        
+        # Build the full prompt
+        system_prompt = """You are an expert Background Verification analyst specializing in CV authenticity checks.
+Your job is to identify:
+1. Education overlaps (studying while working full-time)
+2. Employment gaps or inconsistencies
+3. Timeline abnormalities
+4. Suspicious patterns or red flags
+5. Exaggerated claims or unrealistic achievements
+6. Formatting or content inconsistencies
 
+Also identify positive aspects:
+1. Clear and consistent timeline
+2. Realistic progression
+3. Verifiable information
+4. Professional presentation"""
+
+        user_prompt = f"""{context_info}
+
+CANDIDATE CV/RESUME:
 {cv_text}
 
-Focus on:
-1. Personal Information (name, contact details)
-2. Technical Skills (programming languages, frameworks, tools, databases)
-3. Professional Experience (companies, roles, duration, responsibilities)
-4. Education (degrees, institutions, years)
-5. Projects and achievements
-6. Certifications
-7. Years of total experience"""
-                }
-            ],
-            functions=[{
-                "name": "extract_cv_data",
-                "description": "Extract structured data from CV/Resume",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "personal_info": {
-                            "type": "object",
-                            "properties": {
-                                "name": {"type": "string"},
-                                "email": {"type": "string"},
-                                "phone": {"type": "string"},
-                                "location": {"type": "string"}
-                            }
-                        },
-                        "technical_skills": {
-                            "type": "object",
-                            "properties": {
-                                "programming_languages": {"type": "array", "items": {"type": "string"}},
-                                "frameworks": {"type": "array", "items": {"type": "string"}},
-                                "databases": {"type": "array", "items": {"type": "string"}},
-                                "tools": {"type": "array", "items": {"type": "string"}},
-                                "cloud_platforms": {"type": "array", "items": {"type": "string"}},
-                                "other_skills": {"type": "array", "items": {"type": "string"}}
-                            }
-                        },
-                        "experience": {
-                            "type": "object",
-                            "properties": {
-                                "total_years": {"type": "number"},
-                                "positions": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "company": {"type": "string"},
-                                            "role": {"type": "string"},
-                                            "duration": {"type": "string"},
-                                            "responsibilities": {"type": "array", "items": {"type": "string"}},
-                                            "technologies": {"type": "array", "items": {"type": "string"}}
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                        "education": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "degree": {"type": "string"},
-                                    "institution": {"type": "string"},
-                                    "year": {"type": "string"},
-                                    "field": {"type": "string"}
-                                }
-                            }
-                        },
-                        "projects": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "description": {"type": "string"},
-                                    "technologies": {"type": "array", "items": {"type": "string"}}
-                                }
-                            }
-                        },
-                        "certifications": {"type": "array", "items": {"type": "string"}}
-                    },
-                    "required": ["technical_skills", "experience", "education"]
-                }
-            }],
-            function_call={"name": "extract_cv_data"},
-            temperature=0.1
-        )
-        
-        function_call = response.choices[0].message.function_call
-        if function_call:
-            return json.loads(function_call.arguments)
-        else:
-            raise Exception("No structured data extracted")
-            
-    except Exception as e:
-        print(f"❌ CV extraction error: {e}")
-        raise Exception(f"Failed to extract CV data: {str(e)}")
+Analyze this CV for AUTHENTICITY ONLY (not job matching). Check for:
+1. Education-Employment overlaps (full-time study during full-time work)
+2. Timeline gaps or inconsistencies
+3. Unrealistic claims or exaggerations
+4. Red flags or suspicious patterns
+5. **IMPORTANT**: Consider UAN verification status in your assessment:
+   - If UAN verified: Higher credibility, employment claims are backed by official records
+   - If NO UAN: Lower credibility, employment claims cannot be verified officially
 
-async def extract_structured_jd_data(jd_text: str) -> Dict:
-    """Extract structured data from Job Description using OpenAI GPT-4o mini"""
-    if not openai_client:
-        raise Exception("OpenAI client not configured")
-    
-    try:
+Provide detailed positive and negative findings with an authenticity score.
+**Adjust the score based on UAN status** - candidates with UAN should score higher (more credible)."""
+
+        # Print the prompts for debugging
+        print("\n" + "="*80)
+        print("🤖 SENDING TO OPENAI GPT-4o-mini")
+        print("="*80)
+        print("\n📋 SYSTEM PROMPT:")
+        print("-"*80)
+        print(system_prompt)
+        print("\n📋 USER PROMPT:")
+        print("-"*80)
+        print(user_prompt)
+        print("\n" + "="*80)
+        
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an expert HR analyst. Extract structured requirements from job descriptions."
+                    "content": system_prompt
                 },
                 {
                     "role": "user",
-                    "content": f"""Extract comprehensive requirements from this Job Description:
-
-{jd_text}
-
-Focus on:
-1. Required technical skills (must-have vs nice-to-have)
-2. Experience requirements (years, specific technologies)
-3. Educational qualifications
-4. Role responsibilities
-5. Required tools and technologies"""
+                    "content": user_prompt
                 }
             ],
             functions=[{
-                "name": "extract_jd_requirements",
-                "description": "Extract structured requirements from Job Description",
+                "name": "validate_cv_authenticity",
+                "description": "Validate CV authenticity and identify red flags",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "job_title": {"type": "string"},
-                        "required_skills": {
-                            "type": "object",
-                            "properties": {
-                                "programming_languages": {"type": "array", "items": {"type": "string"}},
-                                "frameworks": {"type": "array", "items": {"type": "string"}},
-                                "databases": {"type": "array", "items": {"type": "string"}},
-                                "tools": {"type": "array", "items": {"type": "string"}},
-                                "cloud_platforms": {"type": "array", "items": {"type": "string"}},
-                                "other_skills": {"type": "array", "items": {"type": "string"}}
-                            }
-                        },
-                        "nice_to_have_skills": {
-                            "type": "object",
-                            "properties": {
-                                "programming_languages": {"type": "array", "items": {"type": "string"}},
-                                "frameworks": {"type": "array", "items": {"type": "string"}},
-                                "databases": {"type": "array", "items": {"type": "string"}},
-                                "tools": {"type": "array", "items": {"type": "string"}},
-                                "cloud_platforms": {"type": "array", "items": {"type": "string"}},
-                                "other_skills": {"type": "array", "items": {"type": "string"}}
-                            }
-                        },
-                        "experience_requirements": {
-                            "type": "object",
-                            "properties": {
-                                "minimum_years": {"type": "number"},
-                                "preferred_years": {"type": "number"},
-                                "specific_experience": {"type": "array", "items": {"type": "string"}}
-                            }
-                        },
-                        "education_requirements": {
-                            "type": "array",
-                            "items": {"type": "string"}
-                        },
-                        "responsibilities": {"type": "array", "items": {"type": "string"}}
-                    },
-                    "required": ["required_skills", "experience_requirements"]
-                }
-            }],
-            function_call={"name": "extract_jd_requirements"},
-            temperature=0.1
-        )
-        
-        function_call = response.choices[0].message.function_call
-        if function_call:
-            return json.loads(function_call.arguments)
-        else:
-            raise Exception("No structured data extracted")
-            
-    except Exception as e:
-        print(f"❌ JD extraction error: {e}")
-        raise Exception(f"Failed to extract JD data: {str(e)}")
-
-async def analyze_cv_vs_jd(cv_data: Dict, jd_data: Dict) -> Dict:
-    """Analyze CV against JD requirements and provide scoring"""
-    if not openai_client:
-        raise Exception("OpenAI client not configured")
-    
-    try:
-        response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an expert HR analyst. Analyze how well a candidate's CV matches job requirements and provide detailed scoring and recommendations."
-                },
-                {
-                    "role": "user",
-                    "content": f"""Analyze this candidate's CV against the job requirements:
-
-CANDIDATE CV DATA:
-{json.dumps(cv_data, indent=2)}
-
-JOB REQUIREMENTS:
-{json.dumps(jd_data, indent=2)}
-
-Provide comprehensive analysis with:
-1. Overall match score (0-100)
-2. Skills analysis (matching vs missing)
-3. Experience analysis
-4. Strengths and weaknesses
-5. Recommendations"""
-                }
-            ],
-            functions=[{
-                "name": "analyze_candidate_match",
-                "description": "Analyze candidate CV against job requirements",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "overall_score": {
+                        "authenticity_score": {
                             "type": "number",
                             "minimum": 0,
                             "maximum": 100,
-                            "description": "Overall match score (0-100)"
+                            "description": "Overall authenticity score (0-100)"
                         },
-                        "skills_analysis": {
+                        "candidate_profile": {
                             "type": "object",
                             "properties": {
-                                "matching_skills": {"type": "array", "items": {"type": "string"}},
-                                "missing_critical_skills": {"type": "array", "items": {"type": "string"}},
-                                "missing_nice_to_have": {"type": "array", "items": {"type": "string"}},
-                                "additional_skills": {"type": "array", "items": {"type": "string"}},
-                                "skills_score": {"type": "number", "minimum": 0, "maximum": 100}
-                            }
-                        },
-                        "experience_analysis": {
-                            "type": "object",
-                            "properties": {
-                                "meets_minimum_experience": {"type": "boolean"},
                                 "total_experience_years": {"type": "number"},
-                                "relevant_experience": {"type": "array", "items": {"type": "string"}},
-                                "experience_score": {"type": "number", "minimum": 0, "maximum": 100}
+                                "education_level": {"type": "string"},
+                                "career_progression": {"type": "string", "enum": ["CONSISTENT", "INCONSISTENT", "UNCLEAR"]},
+                                "timeline_clarity": {"type": "string", "enum": ["CLEAR", "VAGUE", "MISSING"]}
                             }
+                        },
+                        "positive_findings": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Strengths and valid points found in CV"
+                        },
+                        "negative_findings": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Red flags, inconsistencies, and concerns"
                         },
                         "education_analysis": {
                             "type": "object",
                             "properties": {
-                                "meets_requirements": {"type": "boolean"},
-                                "education_details": {"type": "array", "items": {"type": "string"}},
+                                "education_entries": {"type": "array", "items": {"type": "string"}},
+                                "overlaps_detected": {"type": "boolean"},
+                                "overlap_details": {"type": "array", "items": {"type": "string"}},
                                 "education_score": {"type": "number", "minimum": 0, "maximum": 100}
                             }
                         },
-                        "strengths": {"type": "array", "items": {"type": "string"}},
-                        "weaknesses": {"type": "array", "items": {"type": "string"}},
-                        "recommendations": {"type": "array", "items": {"type": "string"}},
-                        "hiring_recommendation": {
+                        "employment_analysis": {
+                            "type": "object",
+                            "properties": {
+                                "employment_entries": {"type": "array", "items": {"type": "string"}},
+                                "gaps_detected": {"type": "boolean"},
+                                "gap_details": {"type": "array", "items": {"type": "string"}},
+                                "uan_verification_status": {"type": "string", "enum": ["MATCHED", "MISMATCHED", "NOT_AVAILABLE"]},
+                                "uan_discrepancies": {"type": "array", "items": {"type": "string"}},
+                                "employment_score": {"type": "number", "minimum": 0, "maximum": 100}
+                            }
+                        },
+                        "timeline_analysis": {
+                            "type": "object",
+                            "properties": {
+                                "timeline_consistent": {"type": "boolean"},
+                                "timeline_issues": {"type": "array", "items": {"type": "string"}},
+                                "timeline_score": {"type": "number", "minimum": 0, "maximum": 100}
+                            }
+                        },
+                        "red_flags": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "severity": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                                    "category": {"type": "string"},
+                                    "description": {"type": "string"}
+                                }
+                            }
+                        },
+                        "recommendation": {
                             "type": "string",
-                            "enum": ["STRONG_HIRE", "HIRE", "MAYBE", "NO_HIRE"]
-                        }
+                            "enum": ["APPROVE", "REVIEW_REQUIRED", "REJECT"],
+                            "description": "Final recommendation based on authenticity"
+                        },
+                        "summary": {"type": "string", "description": "Brief summary of findings"}
                     },
-                    "required": ["overall_score", "skills_analysis", "experience_analysis", "hiring_recommendation"]
+                    "required": ["authenticity_score", "positive_findings", "negative_findings", "recommendation"]
                 }
             }],
-            function_call={"name": "analyze_candidate_match"},
-            temperature=0.2
+            function_call={"name": "validate_cv_authenticity"},
+            temperature=0.1
         )
         
         function_call = response.choices[0].message.function_call
         if function_call:
-            return json.loads(function_call.arguments)
+            result = json.loads(function_call.arguments)
+            
+            # Print the response for debugging
+            print("\n" + "="*80)
+            print("✅ RECEIVED FROM OPENAI")
+            print("="*80)
+            print(json.dumps(result, indent=2))
+            print("="*80 + "\n")
+            
+            return result
         else:
-            raise Exception("No analysis generated")
+            raise Exception("No authenticity analysis generated")
             
     except Exception as e:
-        print(f"❌ Analysis error: {e}")
-        raise Exception(f"Failed to analyze CV vs JD: {str(e)}")
-
-# ------------------------------------------------
-# MAIN CV VALIDATION FUNCTION
-# ------------------------------------------------
-
-async def validate_cv_against_jd(cv_file, jd_file) -> Dict:
-    """
-    Main function to validate CV against JD
-    Returns comprehensive analysis and scoring
-    """
-    try:
-        # Extract text from files
-        cv_text = ""
-        jd_text = ""
-        
-        # Handle CV file
-        if hasattr(cv_file, 'filename'):
-            filename = cv_file.filename.lower()
-            if filename.endswith('.pdf'):
-                cv_text = extract_text_from_pdf(cv_file.file)
-            elif filename.endswith('.docx'):
-                cv_text = extract_text_from_docx(cv_file.file)
-            elif filename.endswith('.txt'):
-                cv_text = extract_text_from_txt(cv_file.file)
-        else:
-            cv_text = str(cv_file)  # Text input
-        
-        # Handle JD file
-        if hasattr(jd_file, 'filename'):
-            filename = jd_file.filename.lower()
-            if filename.endswith('.pdf'):
-                jd_text = extract_text_from_pdf(jd_file.file)
-            elif filename.endswith('.docx'):
-                jd_text = extract_text_from_docx(jd_file.file)
-            elif filename.endswith('.txt'):
-                jd_text = extract_text_from_txt(jd_file.file)
-        else:
-            jd_text = str(jd_file)  # Text input
-        
-        if not cv_text or len(cv_text.strip()) < 50:
-            raise Exception("Could not extract meaningful text from CV")
-        
-        if not jd_text or len(jd_text.strip()) < 50:
-            raise Exception("Could not extract meaningful text from JD")
-        
-        # Extract structured data
-        print("🔍 Extracting structured CV data...")
-        cv_data = await extract_structured_cv_data(cv_text)
-        
-        print("🔍 Extracting structured JD data...")
-        jd_data = await extract_structured_jd_data(jd_text)
-        
-        # Analyze match
-        print("🔍 Analyzing CV vs JD match...")
-        analysis = await analyze_cv_vs_jd(cv_data, jd_data)
-        
-        # Compile final result
-        result = {
-            "validation_id": str(uuid.uuid4()),
-            "timestamp": datetime.utcnow().isoformat(),
-            "cv_data": cv_data,
-            "jd_data": jd_data,
-            "analysis": analysis,
-            "status": "COMPLETED",
-            "method": "OpenAI-GPT4o-mini"
-        }
-        
-        return result
-        
-    except Exception as e:
-        return {
-            "validation_id": str(uuid.uuid4()),
-            "timestamp": datetime.utcnow().isoformat(),
-            "status": "FAILED",
-            "error": str(e),
-            "method": "OpenAI-GPT4o-mini"
-        }
+        print(f"❌ CV authenticity validation error: {e}")
+        raise Exception(f"Failed to validate CV authenticity: {str(e)}")

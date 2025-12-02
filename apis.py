@@ -90,21 +90,36 @@ async def verify_resume_validation(candidate: dict):
 # 📌 HTTP utility
 # ---------------------------------------------------
 async def post_json(url: str, headers: dict, payload: dict):
-    import ssl
     try:
         print(f"🔵 Attempting API call to: {url}")
         print(f"🔵 Payload: {payload}")
         
-        # Create SSL context that doesn't verify certificates (for testing)
+        # Try with httpx first (better SSL handling)
+        try:
+            import httpx
+            async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+                print(f"✅ Response status: {resp.status_code}")
+                data = resp.json()
+                print(f"✅ Response data: {data}")
+                
+                success = resp.status_code == 200 and data.get("success", False)
+                status = "COMPLETED" if success else "FAILED"
+                remarks = data if not success else data.get("data", data)
+                return status, remarks
+        except ImportError:
+            print("⚠️ httpx not available, falling back to aiohttp")
+        
+        # Fallback to aiohttp with SSL disabled
+        import ssl
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
         
-        # Create connector with SSL context
-        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        connector = aiohttp.TCPConnector(ssl=ssl_context, force_close=True)
         
         async with aiohttp.ClientSession(connector=connector) as session:
-            async with session.post(url, json=payload, headers=headers, timeout=60) as resp:
+            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                 print(f"✅ Response status: {resp.status}")
                 data = await resp.json()
                 print(f"✅ Response data: {data}")
@@ -112,15 +127,8 @@ async def post_json(url: str, headers: dict, payload: dict):
                 success = resp.status == 200 and data.get("success", False)
                 status = "COMPLETED" if success else "FAILED"
                 remarks = data if not success else data.get("data", data)
-
                 return status, remarks
 
-    except aiohttp.ClientConnectorError as e:
-        print(f"❌ Connection Error: {e}")
-        return "FAILED", f"Connection Error: Cannot reach Surepass API. Check network/firewall settings."
-    except asyncio.TimeoutError:
-        print(f"❌ Timeout Error")
-        return "FAILED", f"Timeout: Surepass API took too long to respond."
     except Exception as e:
         print(f"❌ API Error: {e}")
         return "FAILED", f"API Error: {str(e)}"

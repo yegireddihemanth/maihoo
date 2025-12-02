@@ -5,7 +5,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi.responses import JSONResponse
 from datetime import datetime, timezone
 from typing import List, Optional
-import os, time, hmac, hashlib, base64, json
+import os, time, hmac, hashlib, base64, json, uuid
 from fastapi.middleware.cors import CORSMiddleware
 from bson import ObjectId
 from fastapi.encoders import jsonable_encoder
@@ -34,6 +34,84 @@ from bson import ObjectId
 from fastapi import UploadFile, File, Form, Depends, HTTPException
 # AI utilities removed - new approach to be implemented
 from utils.email_utils import *
+
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
+
+# -------------------------------
+# AWS S3 Configuration
+# -------------------------------
+import boto3
+from botocore.exceptions import ClientError
+
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_S3_BUCKET_NAME = os.getenv("AWS_S3_BUCKET_NAME")
+AWS_REGION = os.getenv("AWS_REGION", "ap-south-2")
+
+# Debug: Print what was loaded
+print("\n" + "="*60)
+print("🔍 AWS CREDENTIALS DEBUG")
+print("="*60)
+print(f"Access Key ID: {AWS_ACCESS_KEY_ID[:10]}...{AWS_ACCESS_KEY_ID[-4:] if AWS_ACCESS_KEY_ID else 'None'}")
+print(f"Secret Key: {AWS_SECRET_ACCESS_KEY[:10]}...{AWS_SECRET_ACCESS_KEY[-4:] if AWS_SECRET_ACCESS_KEY else 'None'}")
+print(f"Bucket Name: {AWS_S3_BUCKET_NAME}")
+print(f"Region: {AWS_REGION}")
+print("="*60 + "\n")
+
+# Initialize S3 client
+s3_client = None
+if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY and AWS_S3_BUCKET_NAME:
+    try:
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+            region_name=AWS_REGION
+        )
+        print(f"✅ S3 client initialized for bucket: {AWS_S3_BUCKET_NAME}")
+    except Exception as e:
+        print(f"⚠️ Failed to initialize S3 client: {e}")
+else:
+    print("⚠️ S3 credentials not configured")
+
+async def upload_to_s3(file_content: bytes, file_name: str, folder_path: str) -> str:
+    """
+    Upload file to S3 bucket
+    
+    Args:
+        file_content: File bytes
+        file_name: Name of the file
+        folder_path: Folder path in S3 (e.g., "TechCorp/John_Doe")
+    
+    Returns:
+        S3 URL of uploaded file
+    """
+    if not s3_client:
+        raise Exception("S3 client not initialized")
+    
+    try:
+        # Construct S3 key (path)
+        s3_key = f"{folder_path}/{file_name}"
+        
+        # Upload file
+        s3_client.put_object(
+            Bucket=AWS_S3_BUCKET_NAME,
+            Key=s3_key,
+            Body=file_content,
+            ContentType='application/pdf' if file_name.endswith('.pdf') else 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        )
+        
+        # Construct S3 URL
+        s3_url = f"https://{AWS_S3_BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{s3_key}"
+        
+        print(f"✅ Uploaded to S3: {s3_url}")
+        return s3_url
+        
+    except ClientError as e:
+        print(f"❌ S3 upload error: {e}")
+        raise Exception(f"Failed to upload to S3: {str(e)}")
 
 # -------------------------------
 # Config
@@ -1701,23 +1779,37 @@ async def getCandidates(
     )
 
 @app.post("/secure/modifyCandidate")
-async def modifyCandidate(body: dict = Body(...), user: dict = Depends(requireAuth)):
+async def modifyCandidate(
+    operation: str = Form(...),  # "edit" or "delete"
+    candidateId: str = Form(...),
+    organizationId: str = Form(...),
+    # Edit fields (all optional)
+    firstName: str = Form(None),
+    middleName: str = Form(None),
+    lastName: str = Form(None),
+    email: str = Form(None),
+    phone: str = Form(None),
+    aadhaarNumber: str = Form(None),
+    panNumber: str = Form(None),
+    address: str = Form(None),
+    dob: str = Form(None),
+    passportNumber: str = Form(None),
+    uanNumber: str = Form(None),
+    bankAccountNumber: str = Form(None),
+    fatherName: str = Form(None),
+    gender: str = Form(None),
+    district: str = Form(None),
+    state: str = Form(None),
+    pincode: str = Form(None),
+    resume: UploadFile = File(None),  # Optional resume upload
+    user: dict = Depends(requireAuth)
+):
     """
     Modify (EDIT / DELETE) a candidate with role-based access control.
-
-    Body:
-    {
-        "operation": "edit" | "delete",
-        "candidateId": "...",
-        "organizationId": "...",
-        "updates": { ... }   # only for edit
-    }
+    
+    For EDIT: Provide operation="edit" + fields to update + optional resume file
+    For DELETE: Provide operation="delete" only
     """
-
-    operation = body.get("operation")
-    candidateId = body.get("candidateId")
-    organizationId = body.get("organizationId")
-    updates = body.get("updates", {})
 
     if operation not in ["edit", "delete"]:
         raise HTTPException(400, "Invalid operation. Use 'edit' or 'delete'.")
@@ -1815,55 +1907,90 @@ async def modifyCandidate(body: dict = Body(...), user: dict = Depends(requireAu
     # ------------------------------------------
     if operation == "edit":
 
-        if not isinstance(updates, dict) or len(updates) == 0:
-            raise HTTPException(400, "updates object is required for edit")
+        # Build updates dict from form fields
+        updates = {}
+        if firstName is not None: updates["firstName"] = firstName
+        if middleName is not None: updates["middleName"] = middleName
+        if lastName is not None: updates["lastName"] = lastName
+        if email is not None: updates["email"] = email
+        if phone is not None: updates["phone"] = phone
+        if aadhaarNumber is not None: updates["aadhaarNumber"] = aadhaarNumber
+        if panNumber is not None: updates["panNumber"] = panNumber
+        if address is not None: updates["address"] = address
+        if dob is not None: updates["dob"] = dob
+        if passportNumber is not None: updates["passportNumber"] = passportNumber
+        if uanNumber is not None: updates["uanNumber"] = uanNumber
+        if bankAccountNumber is not None: updates["bankAccountNumber"] = bankAccountNumber
+        if fatherName is not None: updates["fatherName"] = fatherName
+        if gender is not None: updates["gender"] = gender
+        if district is not None: updates["district"] = district
+        if state is not None: updates["state"] = state
+        if pincode is not None: updates["pincode"] = pincode
 
-        # ---------------------------------------------------------
-        # UPDATED allowed fields with NEW fields added
-        # ---------------------------------------------------------
-        allowedFields = {
-            "firstName",
-            "middleName",
-            "lastName",
-            "email",
-            "phone",
-            "aadhaarNumber",
-            "panNumber",
-            "address",
-            "dob",
-            "passportNumber",
-            "uanNumber",
-            "bankAccountNumber",
+        # Handle resume upload to S3
+        s3_upload_error = None
+        if resume:
+            try:
+                print(f"📄 Resume file received for update: {resume.filename}")
+                
+                # Validate file type
+                ext = resume.filename.split(".")[-1].lower()
+                if ext not in ["pdf", "docx"]:
+                    raise HTTPException(status_code=400, detail="Only PDF/DOCX files are supported for resume")
+                
+                # Read file content
+                file_content = await resume.read()
+                
+                # Get org name
+                org = await orgsCol.find_one({"_id": ObjectId(organizationId)})
+                orgName = org.get("organizationName") if org else "Unknown"
+                
+                # Get candidate name (use existing or updated)
+                first = firstName if firstName else candidate.get("firstName")
+                last = lastName if lastName else candidate.get("lastName")
+                
+                # Create S3 folder path
+                folder_path = f"{orgName}/{first}_{last}".replace(" ", "_")
+                file_name = f"{first}_{last}_resume.{ext}".replace(" ", "_")
+                
+                # Upload to S3
+                resumePath = await upload_to_s3(file_content, file_name, folder_path)
+                updates["resumePath"] = resumePath
+                print(f"✅ Resume uploaded to S3: {resumePath}")
+                
+            except HTTPException:
+                raise
+            except Exception as e:
+                s3_upload_error = str(e)
+                print(f"⚠️ S3 upload failed: {e}")
 
-            # NEWLY ADDED FIELDS
-            "fatherName",
-            "gender",
-            "district",
-            "state",
-            "pincode"
-        }
+        if len(updates) == 0:
+            raise HTTPException(400, "No fields provided to update")
 
-        clean_updates = {k: v for k, v in updates.items() if k in allowedFields}
-
-        if len(clean_updates) == 0:
-            raise HTTPException(400, "No valid fields provided to update")
-
-        # apply update
+        # Apply update
         await candidatesCol.update_one(
             {"_id": candObjId},
-            {"$set": clean_updates}
+            {"$set": updates}
         )
 
         await logActivity(
             user,
             "Edit Candidate",
-            f"Updated candidate {candidateId}",
+            f"Updated candidate {candidateId}: {', '.join(updates.keys())}",
             "Success"
         )
 
+        response_message = "Candidate updated successfully"
+        if "resumePath" in updates:
+            response_message += " with resume uploaded to S3"
+        elif s3_upload_error:
+            response_message += f" (Warning: Resume upload failed - {s3_upload_error})"
+
         return {
-            "message": "Candidate updated successfully",
-            "updatedFields": list(clean_updates.keys())
+            "message": response_message,
+            "updatedFields": list(updates.keys()),
+            "resumeUploaded": "resumePath" in updates,
+            "s3UploadError": s3_upload_error
         }
 
 @app.post("/secure/initiateStageVerification")
@@ -3649,34 +3776,35 @@ async def selfVerifyStatusV2(verificationId: str):
 
 
 @app.post("/secure/addCandidate")
-async def addCandidate(body: dict = Body(...), user: dict = Depends(requireAuth)):
+async def addCandidate(
+    firstName: str = Form(...),
+    middleName: str = Form(None),
+    lastName: str = Form(...),
+    phone: str = Form(...),
+    aadhaarNumber: str = Form(...),
+    panNumber: str = Form(...),
+    address: str = Form(...),
+    email: str = Form(...),
+    fatherName: str = Form(...),
+    dob: str = Form(...),
+    gender: str = Form(...),
+    uanNumber: str = Form(None),
+    district: str = Form(...),
+    state: str = Form(...),
+    pincode: str = Form(...),
+    organizationId: str = Form(None),
+    resume: UploadFile = File(None),
+    user: dict = Depends(requireAuth)
+):
     role = user.get("role")
     creatorEmail = user.get("email")
     accessibleOrgs = user.get("accessibleOrganizations", [])
     orgId = None
     orgName = None
-
-    # ---------------------------------------------
-    # EXTRACT FIELDS (added new fields)
-    # ---------------------------------------------
-    firstName = body.get("firstName")
-    middleName = body.get("middleName")
-    lastName = body.get("lastName")
-    phone = body.get("phone")
-    aadhaarNumber = body.get("aadhaarNumber")
-    panNumber = body.get("panNumber")
-    address = body.get("address")
-    inputOrgId = body.get("organizationId")
-    candidateEmail = body.get("email")
-
-    # NEW FIELDS
-    fatherName = body.get("fatherName")
-    dob = body.get("dob")
-    gender = body.get("gender")
-    uanNumber = body.get("uanNumber")
-    district = body.get("district")
-    state = body.get("state")
-    pincode = body.get("pincode")
+    
+    # Fields are now from Form parameters (not body)
+    inputOrgId = organizationId
+    candidateEmail = email
 
     # ---------------------------------------------
     # VALIDATION
@@ -3780,6 +3908,42 @@ async def addCandidate(body: dict = Body(...), user: dict = Depends(requireAuth)
         )
 
     # ---------------------------------------------
+    # UPLOAD RESUME TO S3 (if provided)
+    # ---------------------------------------------
+    resumePath = None
+    s3_upload_error = None
+    
+    if resume:
+        try:
+            print(f"📄 Resume file received: {resume.filename}")
+            
+            # Validate file type
+            ext = resume.filename.split(".")[-1].lower()
+            if ext not in ["pdf", "docx"]:
+                raise HTTPException(status_code=400, detail="Only PDF/DOCX files are supported for resume")
+            
+            # Read file content
+            file_content = await resume.read()
+            
+            # Create S3 folder path: {orgName}/{firstName}_{lastName}/
+            folder_path = f"{orgName}/{firstName}_{lastName}".replace(" ", "_")
+            
+            # Create file name: {firstName}_{lastName}_resume.{ext}
+            file_name = f"{firstName}_{lastName}_resume.{ext}".replace(" ", "_")
+            
+            # Upload to S3
+            resumePath = await upload_to_s3(file_content, file_name, folder_path)
+            print(f"✅ Resume uploaded to S3: {resumePath}")
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            # Log error but don't fail candidate creation
+            s3_upload_error = str(e)
+            print(f"⚠️ S3 upload failed: {e}")
+            print(f"⚠️ Continuing with candidate creation without resume")
+
+    # ---------------------------------------------
     # INSERT CANDIDATE (added new fields)
     # ---------------------------------------------
     now = datetime.now(timezone.utc).isoformat()
@@ -3806,6 +3970,10 @@ async def addCandidate(body: dict = Body(...), user: dict = Depends(requireAuth)
         "createdBy": creatorEmail,
         "email": candidateEmail
     }
+    
+    # Add resumePath if S3 upload succeeded
+    if resumePath:
+        candidateDoc["resumePath"] = resumePath
 
     if not orgId:
         raise HTTPException(status_code=400, detail="Internal error: missing organizationId before insert")
@@ -3828,12 +3996,22 @@ async def addCandidate(body: dict = Body(...), user: dict = Depends(requireAuth)
         raise HTTPException(status_code=500, detail="Candidate not found after insert (DB write issue)")
 
     savedCandidate["_id"] = str(savedCandidate["_id"])
+    
+    # Build response message
+    response_message = "Candidate added successfully"
+    if resumePath:
+        response_message += " with resume uploaded to S3"
+    elif s3_upload_error:
+        response_message += f" (Warning: Resume upload failed - {s3_upload_error})"
 
     return JSONResponse(
         status_code=201,
         content=jsonable_encoder({
-            "message": "Candidate added successfully",
-            "candidate": savedCandidate
+            "message": response_message,
+            "candidate": savedCandidate,
+            "resumeUploaded": resumePath is not None,
+            "resumePath": resumePath,
+            "s3UploadError": s3_upload_error
         })
     )
 
@@ -6235,30 +6413,25 @@ async def uploadEducationCertificate(
 @app.post("/secure/ai_cv_validation")
 async def ai_cv_validation(
     verificationId: str = Form(...),
-    cv_file: UploadFile = File(...),
-    jd_file: UploadFile = File(None),
-    jd_text: str = Form(None),
+    panNumber: str = Form(None),  # Optional - PAN to check UAN
+    hasUan: str = Form(None),  # Optional - "yes"/"no" to manually specify UAN status
+    resume: UploadFile = File(None),  # Optional - upload file directly
     user: dict = Depends(requireAuth)
 ):
     """
-    AI CV Validation - Analyze CV against Job Description using AI
+    AI CV Authenticity Validation - Check resume for abnormalities, overlaps, and inconsistencies
+    NO JD required - pure authenticity check
     
     Parameters:
     - verificationId: The verification record ID
-    - cv_file: Candidate's CV/Resume file (PDF/DOCX)
-    - jd_file: Job Description file (PDF/DOCX) - optional
-    - jd_text: Job Description as text - optional (used if no file)
+    - panNumber: Candidate's PAN number (optional - will check if UAN exists)
+    - hasUan: Manual override - "yes" or "no" (optional - skips API call if provided)
+    - resume: Optional resume file upload (PDF/DOCX)
+    
+    Resume Source Priority:
+    1. If 'resume' file provided → use uploaded file (temp storage)
+    2. Else → fetch from candidate.resumePath (supports both local path and S3 URL)
     """
-    
-    # Validation
-    if not cv_file.filename.lower().endswith(('.pdf', '.docx')):
-        raise HTTPException(status_code=400, detail="CV file must be PDF or DOCX")
-    
-    if not jd_file and not jd_text:
-        raise HTTPException(status_code=400, detail="Either JD file or JD text is required")
-    
-    if jd_file and not jd_file.filename.lower().endswith(('.pdf', '.docx', '.txt')):
-        raise HTTPException(status_code=400, detail="JD file must be PDF, DOCX, or TXT")
     
     try:
         # Verify verification record exists and user has access
@@ -6274,6 +6447,64 @@ async def ai_cv_validation(
         
         if not candidate:
             raise HTTPException(status_code=404, detail="Candidate not found")
+        
+        # Determine resume source: uploaded file or database (local/S3)
+        resumePath = None
+        temp_file_path = None
+        is_s3_url = False
+        
+        if resume:
+            # Option 1: Resume file uploaded directly
+            print(f"📄 Using uploaded resume file: {resume.filename}")
+            ext = resume.filename.split(".")[-1].lower()
+            if ext not in ["pdf", "docx"]:
+                raise HTTPException(status_code=400, detail="Only PDF/DOCX files are supported")
+            
+            # Save temporarily
+            import tempfile
+            temp_file_path = f"/tmp/temp_resume_{candidateId}.{ext}"
+            with open(temp_file_path, "wb") as f:
+                f.write(await resume.read())
+            resumePath = temp_file_path
+            print(f"✅ Saved to temp: {temp_file_path}")
+        else:
+            # Option 2: Fetch from candidate.resumePath (local or S3)
+            resumePath = candidate.get("resumePath")
+            if not resumePath:
+                raise HTTPException(status_code=400, detail="No resume provided and candidate has no resume in database. Please upload resume.")
+            
+            # Check if it's an S3 URL
+            if resumePath.startswith("http://") or resumePath.startswith("https://") or resumePath.startswith("s3://"):
+                is_s3_url = True
+                print(f"📄 Resume is S3 URL: {resumePath}")
+                
+                # Download from S3 using boto3 (with credentials)
+                try:
+                    # Extract S3 key from URL
+                    # URL format: https://maihoofiles.s3.ap-south-2.amazonaws.com/TVA/John_Doe/resume.pdf
+                    # Extract: TVA/John_Doe/resume.pdf
+                    s3_key = resumePath.split(f"{AWS_S3_BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/")[1]
+                    
+                    ext = resumePath.split(".")[-1].lower()
+                    if ext not in ["pdf", "docx"]:
+                        ext = "pdf"  # default
+                    
+                    temp_file_path = f"/tmp/s3_resume_{candidateId}.{ext}"
+                    
+                    # Download from S3 using boto3
+                    if s3_client:
+                        s3_client.download_file(AWS_S3_BUCKET_NAME, s3_key, temp_file_path)
+                        resumePath = temp_file_path
+                        print(f"✅ Downloaded from S3 using boto3: {temp_file_path}")
+                    else:
+                        raise Exception("S3 client not initialized")
+                        
+                except Exception as s3_error:
+                    print(f"❌ S3 download error: {s3_error}")
+                    raise HTTPException(status_code=400, detail=f"Failed to fetch resume from S3: {str(s3_error)}")
+            else:
+                # Local file path
+                print(f"📄 Using local resume path: {resumePath}")
         
         candidateOrgId = str(candidate.get("organizationId"))
         
@@ -6302,20 +6533,95 @@ async def ai_cv_validation(
         if not allowed:
             raise HTTPException(status_code=403, detail="You are not authorized to perform AI CV validation for this candidate")
         
-        # Prepare JD input
-        jd_input = jd_file if jd_file else jd_text
+        # Step 1: Extract CV text
+        from utils.ai_utils import extract_text_from_pdf, extract_text_from_docx, validate_cv_authenticity
         
-        # Perform AI CV validation
-        from utils.ai_utils import validate_cv_against_jd
+        ext = resumePath.split(".")[-1].lower()
+        cv_text = ""
         
-        print(f"🔍 Starting AI CV validation for verification {verificationId}")
-        validation_result = await validate_cv_against_jd(cv_file, jd_input)
+        if ext == "pdf":
+            with open(resumePath, 'rb') as f:
+                cv_text = extract_text_from_pdf(f)
+        elif ext == "docx":
+            cv_text = extract_text_from_docx(resumePath)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported resume format: {ext}")
         
-        if validation_result.get("status") == "FAILED":
-            raise HTTPException(status_code=500, detail=f"AI validation failed: {validation_result.get('error')}")
+        if not cv_text or len(cv_text.strip()) < 50:
+            raise HTTPException(status_code=400, detail="Could not extract meaningful text from resume")
         
-        # Store AI analysis results but keep status as PENDING for manual review
-        analysis = validation_result.get("analysis", {})
+        # Step 2: Check if candidate has UAN (indicates formal employment)
+        from apis import verify_pan_to_uan
+        
+        candidate_type = "UNKNOWN"
+        uan_num = None
+        has_uan_bool = False
+        uan_verification_note = ""
+        
+        # Option 1: Manual override (no API call)
+        if hasUan and hasUan.lower() in ["yes", "no"]:
+            has_uan_bool = hasUan.lower() == "yes"
+            if has_uan_bool:
+                candidate_type = "EXPERIENCED_WITH_UAN"
+                uan_verification_note = "✅ UAN status manually confirmed: YES. Candidate has formal employment."
+                print(f"✅ Manual override: Candidate HAS UAN")
+            else:
+                candidate_type = "EXPERIENCED_NO_UAN"
+                uan_verification_note = "⚠️ UAN status manually confirmed: NO. Candidate has no formal EPFO record."
+                print(f"⚠️ Manual override: Candidate has NO UAN")
+        
+        # Option 2: Check UAN via API
+        elif panNumber:
+            print(f"🔍 Checking UAN for PAN: {panNumber}")
+            
+            try:
+                uan_status, uan_result = await verify_pan_to_uan(panNumber)
+                
+                if uan_status == "COMPLETED":
+                    uan_num = uan_result.get("uan_number") or uan_result.get("uan")
+                    
+                    if uan_num:
+                        has_uan_bool = True
+                        candidate_type = "EXPERIENCED_WITH_UAN"
+                        uan_verification_note = f"✅ UAN verified via API: {uan_num}. Candidate has formal employment history registered with EPFO."
+                        print(f"✅ UAN found: {uan_num} - Candidate has formal employment record")
+                    else:
+                        candidate_type = "EXPERIENCED_NO_UAN"
+                        uan_verification_note = "⚠️ No UAN found via API. Candidate may be fresher, freelancer, or worked in unorganized sector."
+                        print(f"⚠️ No UAN found - Candidate has no formal EPFO record")
+                else:
+                    print(f"⚠️ UAN check failed: {uan_result}")
+                    candidate_type = "UNKNOWN"
+                    uan_verification_note = "❌ UAN verification failed due to API error."
+                    
+            except Exception as uan_error:
+                print(f"❌ UAN check error: {uan_error}")
+                candidate_type = "UNKNOWN"
+                uan_verification_note = "❌ UAN verification failed due to network error."
+        
+        # Option 3: No UAN check
+        else:
+            print(f"⚠️ No PAN or hasUan provided - skipping UAN verification")
+            uan_verification_note = "⚠️ UAN verification skipped (no PAN or manual status provided)."
+        
+        # Determine candidate type from CV if still unknown
+        if candidate_type == "UNKNOWN":
+            if "experience" in cv_text.lower() or "worked" in cv_text.lower() or "company" in cv_text.lower():
+                candidate_type = "EXPERIENCED_NO_UAN"
+            else:
+                candidate_type = "FRESHER"
+            print(f"📋 Determined candidate type from CV: {candidate_type}")
+        
+        # Step 3: Perform AI authenticity validation
+        print(f"🔍 Starting AI CV authenticity validation for verification {verificationId}")
+        print(f"📊 Candidate Type: {candidate_type}")
+        print(f"📊 Has UAN: {has_uan_bool}")
+        
+        # Pass UAN status to AI for credibility assessment
+        validation_result = await validate_cv_authenticity(cv_text, has_uan_bool, candidate_type, uan_verification_note)
+        
+        if not validation_result:
+            raise HTTPException(status_code=500, detail="AI validation failed to return results")
         
         # Find the ai_cv_validation check in the verification stages
         stages = verification.get("stages", {})
@@ -6323,27 +6629,33 @@ async def ai_cv_validation(
         
         for stage_name, checks in stages.items():
             for check in checks:
-                if check.get("checkName") == "ai_cv_validation":
+                if check.get("checkName") == "ai_cv_validation" or check.get("check") == "ai_cv_validation":
                     # Update the check with AI results but keep PENDING status
                     check.update({
                         "status": "PENDING",  # Keep PENDING for manual review
                         "aiAnalysisCompleted": True,  # Flag that AI analysis is done
                         "aiAnalysisAt": datetime.now(timezone.utc),
                         "aiAnalysisBy": user.get("email"),
+                        "candidateType": candidate_type,
+                        "uanNumber": uan_num,
+                        "hasUan": has_uan_bool,
+                        "uanVerificationNote": uan_verification_note,
                         "aiAnalysis": {
-                            "overall_score": analysis.get("overall_score", 0),
-                            "skills_analysis": analysis.get("skills_analysis", {}),
-                            "experience_analysis": analysis.get("experience_analysis", {}),
-                            "education_analysis": analysis.get("education_analysis", {}),
-                            "strengths": analysis.get("strengths", []),
-                            "weaknesses": analysis.get("weaknesses", []),
-                            "recommendations": analysis.get("recommendations", []),
-                            "hiring_recommendation": analysis.get("hiring_recommendation", "REVIEW"),
-                            "validation_id": validation_result.get("validation_id"),
-                            "timestamp": validation_result.get("timestamp"),
-                            "method": validation_result.get("method")
+                            "authenticity_score": validation_result.get("authenticity_score", 0),
+                            "candidate_profile": validation_result.get("candidate_profile", {}),
+                            "positive_findings": validation_result.get("positive_findings", []),
+                            "negative_findings": validation_result.get("negative_findings", []),
+                            "education_analysis": validation_result.get("education_analysis", {}),
+                            "employment_analysis": validation_result.get("employment_analysis", {}),
+                            "timeline_analysis": validation_result.get("timeline_analysis", {}),
+                            "red_flags": validation_result.get("red_flags", []),
+                            "recommendation": validation_result.get("recommendation", "REVIEW_REQUIRED"),
+                            "summary": validation_result.get("summary", ""),
+                            "validation_id": str(uuid.uuid4()),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "method": "OpenAI-GPT4o-mini-Authenticity"
                         },
-                        "remarks": f"AI analysis completed. Overall Score: {analysis.get('overall_score', 0)}/100. Recommendation: {analysis.get('hiring_recommendation', 'REVIEW')}. Awaiting manual review and submission."
+                        "remarks": f"AI authenticity check completed. Score: {validation_result.get('authenticity_score', 0)}/100. Type: {candidate_type}. Recommendation: {validation_result.get('recommendation', 'REVIEW_REQUIRED')}. Awaiting manual review."
                     })
                     updated = True
                     break
@@ -6362,38 +6674,37 @@ async def ai_cv_validation(
         # Log activity
         await logActivity(
             user,
-            "AI CV Analysis Completed",
-            f"AI analysis completed for candidate {candidate.get('firstName', '')} {candidate.get('lastName', '')} (Score: {analysis.get('overall_score', 0)}/100). Awaiting manual review.",
+            "AI CV Authenticity Check Completed",
+            f"AI authenticity check completed for {candidate.get('firstName', '')} {candidate.get('lastName', '')} (Score: {validation_result.get('authenticity_score', 0)}/100, Type: {candidate_type}). Awaiting manual review.",
             "Success"
         )
+        
+        # Build response message
+        response_message = "AI CV authenticity check completed successfully. Please review and submit."
+        if not uan_num and candidate_type == "EXPERIENCED_NO_UAN":
+            response_message += " Note: UAN could not be fetched (network issue or not available). Analysis based on CV content only."
         
         return JSONResponse(
             status_code=200,
             content=jsonable_encoder({
-                "message": "AI CV analysis completed successfully. Please review and submit the check.",
+                "message": response_message,
                 "verificationId": verificationId,
                 "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
+                "candidateType": candidate_type,
+                "uanNumber": uan_num,
+                "hasUan": has_uan_bool,
+                "uanVerificationNote": uan_verification_note,
                 "analysis": {
-                    "overall_score": analysis.get("overall_score", 0),
-                    "hiring_recommendation": analysis.get("hiring_recommendation", "REVIEW"),
-                    "skills_analysis": {
-                        "matching_skills": analysis.get("skills_analysis", {}).get("matching_skills", []),
-                        "missing_critical_skills": analysis.get("skills_analysis", {}).get("missing_critical_skills", []),
-                        "skills_score": analysis.get("skills_analysis", {}).get("skills_score", 0)
-                    },
-                    "experience_analysis": {
-                        "meets_minimum_experience": analysis.get("experience_analysis", {}).get("meets_minimum_experience", False),
-                        "total_experience_years": analysis.get("experience_analysis", {}).get("total_experience_years", 0),
-                        "experience_score": analysis.get("experience_analysis", {}).get("experience_score", 0)
-                    },
-                    "strengths": analysis.get("strengths", []),
-                    "weaknesses": analysis.get("weaknesses", []),
-                    "recommendations": analysis.get("recommendations", [])
-                },
-                "validation_details": {
-                    "validation_id": validation_result.get("validation_id"),
-                    "timestamp": validation_result.get("timestamp"),
-                    "method": validation_result.get("method")
+                    "authenticity_score": validation_result.get("authenticity_score", 0),
+                    "recommendation": validation_result.get("recommendation", "REVIEW_REQUIRED"),
+                    "candidate_profile": validation_result.get("candidate_profile", {}),
+                    "positive_findings": validation_result.get("positive_findings", []),
+                    "negative_findings": validation_result.get("negative_findings", []),
+                    "education_analysis": validation_result.get("education_analysis", {}),
+                    "employment_analysis": validation_result.get("employment_analysis", {}),
+                    "timeline_analysis": validation_result.get("timeline_analysis", {}),
+                    "red_flags": validation_result.get("red_flags", []),
+                    "summary": validation_result.get("summary", "")
                 }
             })
         )
@@ -6401,6 +6712,11 @@ async def ai_cv_validation(
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"❌ AI CV Validation Error: {str(e)}")
+        print(f"📋 Full traceback:\n{error_details}")
+        
         await logActivity(
             user,
             "AI CV Validation Failed",
@@ -6408,6 +6724,16 @@ async def ai_cv_validation(
             "Error"
         )
         raise HTTPException(status_code=500, detail=f"AI CV validation failed: {str(e)}")
+    finally:
+        # Cleanup temporary file if it was created
+        if temp_file_path:
+            try:
+                import os
+                if os.path.exists(temp_file_path):
+                    os.remove(temp_file_path)
+                    print(f"🗑️ Cleaned up temporary file: {temp_file_path}")
+            except Exception as cleanup_error:
+                print(f"⚠️ Failed to cleanup temp file: {cleanup_error}")
 
 
 @app.get("/secure/ai_cv_validation_results/{verificationId}")
@@ -6416,7 +6742,7 @@ async def get_ai_cv_validation_results(
     user: dict = Depends(requireAuth)
 ):
     """
-    Get AI CV validation results for a verification record
+    Get AI CV authenticity validation results for a verification record
     """
     try:
         verificationObjId = ObjectId(verificationId)
@@ -6462,17 +6788,19 @@ async def get_ai_cv_validation_results(
         # Find AI CV validation results
         stages = verification.get("stages", {})
         ai_results = None
+        check_data = None
         
         for stage_name, checks in stages.items():
             for check in checks:
-                if check.get("checkName") == "ai_cv_validation":
+                if check.get("checkName") == "ai_cv_validation" or check.get("check") == "ai_cv_validation":
                     ai_results = check.get("aiAnalysis")
+                    check_data = check
                     break
             if ai_results:
                 break
         
         if not ai_results:
-            raise HTTPException(status_code=404, detail="AI CV validation results not found")
+            raise HTTPException(status_code=404, detail="AI CV validation results not found. Please run the validation first.")
         
         return JSONResponse(
             status_code=200,
@@ -6480,7 +6808,12 @@ async def get_ai_cv_validation_results(
                 "verificationId": verificationId,
                 "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
                 "candidateEmail": candidate.get("email", ""),
-                "aiAnalysis": ai_results
+                "candidateType": check_data.get("candidateType", "UNKNOWN"),
+                "uanNumber": check_data.get("uanNumber"),
+                "employmentHistoryFetched": check_data.get("employmentHistoryFetched", False),
+                "aiAnalysis": ai_results,
+                "status": check_data.get("status", "PENDING"),
+                "remarks": check_data.get("remarks", "")
             })
         )
         
@@ -6498,7 +6831,7 @@ async def submit_ai_cv_validation(
     user: dict = Depends(requireAuth)
 ):
     """
-    Submit final decision for AI CV validation after reviewing AI analysis
+    Submit final decision for AI CV authenticity validation after reviewing AI analysis
     
     Parameters:
     - verificationId: The verification record ID
@@ -6556,16 +6889,17 @@ async def submit_ai_cv_validation(
         
         for stage_name, checks in stages.items():
             for check in checks:
-                if check.get("checkName") == "ai_cv_validation":
+                if check.get("checkName") == "ai_cv_validation" or check.get("check") == "ai_cv_validation":
                     # Verify AI analysis was completed
                     if not check.get("aiAnalysisCompleted"):
                         raise HTTPException(status_code=400, detail="AI analysis must be completed before submission")
                     
                     # Update with final status and staff decision
-                    ai_score = check.get("aiAnalysis", {}).get("overall_score", 0)
-                    ai_recommendation = check.get("aiAnalysis", {}).get("hiring_recommendation", "REVIEW")
+                    ai_score = check.get("aiAnalysis", {}).get("authenticity_score", 0)
+                    ai_recommendation = check.get("aiAnalysis", {}).get("recommendation", "REVIEW_REQUIRED")
+                    candidate_type = check.get("candidateType", "UNKNOWN")
                     
-                    final_remarks = f"AI Score: {ai_score}/100, AI Recommendation: {ai_recommendation}"
+                    final_remarks = f"AI Authenticity Score: {ai_score}/100, Type: {candidate_type}, AI Recommendation: {ai_recommendation}"
                     if staff_remarks:
                         final_remarks += f". Staff Review: {staff_remarks}"
                     
@@ -6594,15 +6928,15 @@ async def submit_ai_cv_validation(
         # Log activity
         await logActivity(
             user,
-            f"AI CV Validation {final_status}",
-            f"Staff submitted AI CV validation as {final_status} for candidate {candidate.get('firstName', '')} {candidate.get('lastName', '')}",
+            f"AI CV Authenticity Validation {final_status}",
+            f"Staff submitted AI CV authenticity validation as {final_status} for candidate {candidate.get('firstName', '')} {candidate.get('lastName', '')}",
             "Success"
         )
         
         return JSONResponse(
             status_code=200,
             content=jsonable_encoder({
-                "message": f"AI CV validation submitted as {final_status} successfully",
+                "message": f"AI CV authenticity validation submitted as {final_status} successfully",
                 "verificationId": verificationId,
                 "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
                 "finalStatus": final_status,
