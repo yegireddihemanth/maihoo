@@ -6726,14 +6726,14 @@ async def ai_cv_validation(
         raise HTTPException(status_code=500, detail=f"AI CV validation failed: {str(e)}")
     finally:
         # Cleanup temporary file if it was created
-        if temp_file_path:
-            try:
+        try:
+            if 'temp_file_path' in locals() and temp_file_path:
                 import os
                 if os.path.exists(temp_file_path):
                     os.remove(temp_file_path)
                     print(f"🗑️ Cleaned up temporary file: {temp_file_path}")
-            except Exception as cleanup_error:
-                print(f"⚠️ Failed to cleanup temp file: {cleanup_error}")
+        except Exception as cleanup_error:
+            print(f"⚠️ Failed to cleanup temp file: {cleanup_error}")
 
 
 @app.get("/secure/ai_cv_validation_results/{verificationId}")
