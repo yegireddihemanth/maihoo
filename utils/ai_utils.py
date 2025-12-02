@@ -8,6 +8,10 @@ import json
 import os
 from typing import Dict, List, Optional
 
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
+
 # OpenAI Integration
 try:
     import openai
@@ -17,7 +21,7 @@ except ImportError:
     print("⚠️ OpenAI not installed. Install with: pip install openai")
 
 # Initialize OpenAI client
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "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")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 if OPENAI_API_KEY and OPENAI_AVAILABLE:
     openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
 else:
