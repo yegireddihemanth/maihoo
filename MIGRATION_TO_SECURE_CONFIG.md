@@ -72,7 +72,7 @@ nano .env
 ```bash
 SUREPASS_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 MONGO_URI=mongodb+srv://maihoo:password@cluster.mongodb.net/
-OPENAI_API_KEY=sk-proj-...
+# AI configuration removed
 SESSION_SECRET=your-super-secret-key
 CLOUDINARY_CLOUD_NAME=dz0nugtfe
 CLOUDINARY_API_KEY=823959276223763
@@ -188,7 +188,7 @@ git push origin --force --all
 {
   "SUREPASS_TOKEN": "eyJhbGc...",
   "MONGO_URI": "mongodb+srv://...",
-  "OPENAI_API_KEY": "sk-proj-...",
+  // AI configuration removed
   "SESSION_SECRET": "your-secret-key",
   "CLOUDINARY_CLOUD_NAME": "dz0nugtfe",
   "CLOUDINARY_API_KEY": "823959276223763",

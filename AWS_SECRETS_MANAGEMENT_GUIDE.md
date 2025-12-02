@@ -7,7 +7,6 @@ You're exposing sensitive keys in your code:
 ```python
 # ❌ BAD - Exposed in config.py
 SUREPASS_TOKEN = "eyJhbGc..."
-OPENAI_API_KEY = "sk-..."
 MONGO_URI = "mongodb+srv://username:password@..."
 ```
 
@@ -49,7 +48,6 @@ Click "Store a new secret" → "Other type of secret"
 {
   "SUREPASS_TOKEN": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
   "MONGO_URI": "mongodb+srv://maihoo:password@cluster.mongodb.net/",
-  "OPENAI_API_KEY": "sk-proj-...",
   "SESSION_SECRET": "super-secret-key-for-sessions",
   "CLOUDINARY_CLOUD_NAME": "dz0nugtfe",
   "CLOUDINARY_API_KEY": "823959276223763",
@@ -187,7 +185,7 @@ class SecretsManager:
         return {
             'SUREPASS_TOKEN': os.getenv('SUREPASS_TOKEN', ''),
             'MONGO_URI': os.getenv('MONGO_URI', ''),
-            'OPENAI_API_KEY': os.getenv('OPENAI_API_KEY', ''),
+            # AI configuration removed
             'SESSION_SECRET': os.getenv('SESSION_SECRET', 'dev-secret-key'),
             'CLOUDINARY_CLOUD_NAME': os.getenv('CLOUDINARY_CLOUD_NAME', ''),
             'CLOUDINARY_API_KEY': os.getenv('CLOUDINARY_API_KEY', ''),
@@ -223,8 +221,7 @@ SUREPASS_TOKEN = secrets_manager.get('SUREPASS_TOKEN')
 MONGO_URI = secrets_manager.get('MONGO_URI')
 MONGO_DB_NAME = "bgv_core"
 
-# OpenAI (if using)
-OPENAI_API_KEY = secrets_manager.get('OPENAI_API_KEY')
+# AI configuration removed
 
 # Session Secret
 SESSION_SECRET = secrets_manager.get('SESSION_SECRET').encode()
@@ -356,7 +353,7 @@ nano .env
 ```bash
 SUREPASS_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 MONGO_URI=mongodb+srv://maihoo:password@cluster.mongodb.net/
-OPENAI_API_KEY=sk-proj-...
+# AI configuration removed
 SESSION_SECRET=super-secret-key-for-sessions
 CLOUDINARY_CLOUD_NAME=dz0nugtfe
 CLOUDINARY_API_KEY=823959276223763
@@ -390,7 +387,7 @@ load_dotenv()
 SUREPASS_TOKEN = os.getenv('SUREPASS_TOKEN')
 MONGO_URI = os.getenv('MONGO_URI')
 MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'bgv_core')
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+# AI configuration removed
 SESSION_SECRET = os.getenv('SESSION_SECRET', 'default-secret').encode()
 
 # Cloudinary

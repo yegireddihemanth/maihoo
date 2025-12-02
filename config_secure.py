@@ -27,12 +27,12 @@ if not MONGO_URI:
     print("⚠️ WARNING: MONGO_URI not configured")
 
 # ============================================
-# OpenAI Configuration (for AI features)
+# OpenAI Configuration (for AI CV Validation)
 # ============================================
 OPENAI_API_KEY = secrets_manager.get('OPENAI_API_KEY')
 
 if not OPENAI_API_KEY:
-    print("ℹ️ INFO: OPENAI_API_KEY not configured (AI features will use Ollama)")
+    print("⚠️ INFO: OPENAI_API_KEY not configured (AI CV validation will not work)")
 
 # ============================================
 # Session Configuration

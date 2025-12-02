@@ -34,7 +34,7 @@
 | Check Name | Type | Required Fields | Time | Cost |
 |------------|------|----------------|------|------|
 | `resume_validation` | AI | resumePath | 5-10s | Free |
-| `education_check_ai` | AI | educationCertificatePath | 5-10s | Free |
+| `education_check_manual` | Manual | firstName, lastName | Manual | Free |
 
 ---
 
@@ -95,7 +95,7 @@ POST /secure/runStage
 
 **What Happens:**
 - ✅ Runs all API checks (PAN, Aadhaar, etc.)
-- ✅ Runs all AI checks (Resume, Education AI)
+- ✅ Runs all API checks only (AI checks removed)
 - ⏳ Skips manual checks (leaves as PENDING)
 
 **Response:**
@@ -225,7 +225,7 @@ function CheckSelectionForm({ candidateId, onSubmit }) {
     ],
     ai: [
       { id: 'resume_validation', name: 'Resume Validation', cost: 0, time: '5-10s' },
-      { id: 'education_check_ai', name: 'Education AI Check', cost: 0, time: '5-10s' }
+      // AI checks removed - new approach to be implemented
     ]
   };
   
@@ -366,7 +366,7 @@ function VerificationDetail({ verificationId }) {
   
   const getCheckType = (checkName) => {
     const apiChecks = ['pan_verification', 'aadhaar_verification', 'employment_history', 'credit_report', 'court_record'];
-    const aiChecks = ['resume_validation', 'education_check_ai'];
+    const aiChecks = []; // AI checks removed
     
     if (apiChecks.includes(checkName)) return 'API';
     if (aiChecks.includes(checkName)) return 'AI';
@@ -741,7 +741,7 @@ const updateManualCheck = async (verificationId, checkName, status, remarks) => 
 
 **AI Checks (Use for document analysis):**
 - Resume Validation → Check resume authenticity
-- Education AI Check → Validate certificates
+- Education Manual Check → Manual certificate verification
 
 ---
 

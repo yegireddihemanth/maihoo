@@ -280,6 +280,20 @@ async def verify_employment_history_manual(candidate: dict):
         "instructions": "Manually verify employment history through previous employers, documents, or references"
     }
 
+async def verify_ai_cv_validation(candidate: dict):
+    """
+    AI CV Validation check - manual process with AI assistance
+    Returns PENDING status as this requires manual verification through UI with AI analysis
+    """
+    return "PENDING", {
+        "message": "AI CV validation pending manual verification with AI analysis",
+        "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
+        "candidateEmail": candidate.get("email", ""),
+        "requiresManualVerification": True,
+        "requiresAIAnalysis": True,
+        "instructions": "Upload candidate's CV/Resume and Job Description for AI-powered analysis and scoring"
+    }
+
 
 # ---------------------------------------------------
 # 📌 Dispatcher (FULL — ONLY FIXED pan_aadhaar)
@@ -297,7 +311,7 @@ def validate_fields(check_type, candidate):
         # Internal verification checks
         "address_verification": ["address"],  # basic address required
         "education_check_manual": ["firstName", "lastName"],  # basic name required
-        "education_check_ai": ["educationCertificatePath"],  # certificate file required
+        "ai_cv_validation": ["firstName", "lastName"],  # AI CV validation check
         "supervisory_check": ["firstName", "lastName"],  # basic name required
         "employment_history_manual": ["firstName", "lastName"]  # basic name required
     }
@@ -347,8 +361,8 @@ async def run_verification(check_type: str, candidate: dict):
     if check_type == "education_check_manual":
         return await verify_education_manual(candidate)
     
-    if check_type == "education_check_ai":
-        return await verify_education_ai(candidate)
+    if check_type == "ai_cv_validation":
+        return await verify_ai_cv_validation(candidate)
     
     if check_type == "supervisory_check":
         return await verify_supervisory_check(candidate)

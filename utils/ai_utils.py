@@ -1,323 +1,444 @@
+# AI Utilities - CV Validation with OpenAI
 import PyPDF2
 import docx
 import uuid
 from datetime import datetime
 from pymongo import MongoClient
-import torch
-from sentence_transformers import util
 import re
+import json
+import os
+from typing import Dict, List, Optional
 
-from ollama import Client
+# OpenAI Integration
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    print("⚠️ OpenAI not installed. Install with: pip install openai")
 
-# ------------------------------------------------
-# OLLAMA CLIENT
-# ------------------------------------------------
-ollama = Client()
-
-LLM_MODEL = "llama3.2"
-EMBED_MODEL = "nomic-embed-text"
-EMB_DIM = 768  # force final embedding size
-
-
-
-
-# ------------------------------------------------
-# MONGO
-# ------------------------------------------------
-mongoUri = "mongodb+srv://maihoo:akonpopStar%40143@maihoo.ztaytqd.mongodb.net/?appName=maihoo"
-client_mongo = MongoClient(mongoUri)
-db = client_mongo["bgv_core"]
-collection = db["resume_matches"]
-
+# Initialize OpenAI client
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+if OPENAI_API_KEY and OPENAI_AVAILABLE:
+    openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+else:
+    openai_client = None
+    print("⚠️ OpenAI API key not configured")
 
 # ------------------------------------------------
-# TEXT EXTRACTORS
+# TEXT EXTRACTION UTILITIES
 # ------------------------------------------------
-def extract_text_from_pdf(file):
+
+def extract_text_from_pdf(file_obj):
+    """Extract text from PDF file"""
     try:
-        pdf = PyPDF2.PdfReader(file)
-        return "\n".join([(p.extract_text() or "") for p in pdf.pages])
-    except:
-        return ""
-
-
-def extract_text_from_docx(file):
-    try:
-        doc = docx.Document(file)
-        return "\n".join([p.text for p in doc.paragraphs])
-    except:
-        return ""
-
-
-# ------------------------------------------------
-# CLEAN LLaMA OUTPUT
-# ------------------------------------------------
-def clean_llama_output(text):
-    if not text:
-        return ""
-
-    text = re.sub(r"\*\*|__", "", text)
-    text = re.sub(r"[•\-*]\s*", "", text)
-    text = re.sub(r"Here is.*?:", "", text, flags=re.I)
-    text = re.sub(r"Here are.*?:", "", text, flags=re.I)
-    text = re.sub(r"[#>\[\]\(\)]", "", text)
-
-    return text.strip()
-
-
-# ------------------------------------------------
-# EXTRACTION PROMPT
-# ------------------------------------------------
-def build_prompt(text):
-    return f"""
-Extract ALL important technical and job-related information from the text.
-
-Return ONLY ONE single plain text paragraph containing:
-skills, tools, experience, frameworks, projects, job roles, domain, achievements.
-
-NO bullet points.
-NO markdown.
-NO headings.
-NO explanation.
-ONE clean paragraph only.
-
-TEXT:
-{text}
-"""
-
-
-# ------------------------------------------------
-# CALL LLaMA3 FOR EXTRACTION
-# ------------------------------------------------
-def extract_with_llama(text):
-    try:
-        if len(text) > 5000:
-            text = text[:5000]
-
-        print("\n🟣 LLM CALL STARTED")
-        prompt = build_prompt(text)
-
-        res = ollama.chat(
-            model=LLM_MODEL,
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        raw = res["message"]["content"]
-        return clean_llama_output(raw)
-
+        reader = PyPDF2.PdfReader(file_obj)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() + "\n"
+        return text.strip()
     except Exception as e:
-        print("❌ LLM ERROR:", e)
+        print(f"❌ PDF extraction error: {e}")
         return ""
 
-
-# ------------------------------------------------
-# EMBEDDINGS (PYTHON OLLAMA SDK ONLY)
-# ------------------------------------------------
-def fix_dim(v):
-    if len(v) > EMB_DIM:
-        return v[:EMB_DIM]
-    if len(v) < EMB_DIM:
-        return v + [0.0] * (EMB_DIM - len(v))
-    return v
-
-
-def get_embedding(text):
+def extract_text_from_docx(file_obj):
+    """Extract text from DOCX file"""
     try:
-        print("\n🔵 GENERATING EMBEDDING USING OLLAMA PYTHON SDK")
-
-        res = ollama.embeddings(
-            model=EMBED_MODEL,
-            prompt=text
-        )
-
-        vec = res["embedding"]
-        print("Embedding size returned =", len(vec))
-
-        fixed = fix_dim(vec)
-        print("Final embedding size =", len(fixed))
-
-        return fixed
-
+        doc = docx.Document(file_obj)
+        text = ""
+        for paragraph in doc.paragraphs:
+            text += paragraph.text + "\n"
+        return text.strip()
     except Exception as e:
-        print("❌ EMBEDDING ERROR:", e)
-        return [0.0] * EMB_DIM
+        print(f"❌ DOCX extraction error: {e}")
+        return ""
 
-
-# ------------------------------------------------
-# MAIN PIPELINE
-# ------------------------------------------------
-async def generate_resume_embeddings_and_rank(resumes, jd):
-
-    runId = f"RUN_{uuid.uuid4()}"
-    collection.insert_one({"pipelineRunId": runId, "createdAt": datetime.utcnow()})
-
-    # ------------------ JD ------------------
-    jd_extracted = extract_with_llama(jd)
-
-    print("\n==============================")
-    print("📘 JD EXTRACTED TEXT")
-    print("==============================")
-    print(jd_extracted[:1500], "\n")
-
-    jd_vec = get_embedding(jd_extracted)
-
-    results = []
-
-    # ------------------ RESUMES ------------------
-    for f in resumes:
-
-        print("\n=============================================")
-        print(f"📄 Processing Resume: {f.filename}")
-        print("=============================================")
-
-        if f.filename.lower().endswith(".pdf"):
-            raw = extract_text_from_pdf(f.file)
-        else:
-            raw = extract_text_from_docx(f.file)
-
-        resume_extracted = extract_with_llama(raw)
-
-        print("\n==============================")
-        print("📄 RESUME EXTRACTED TEXT")
-        print("==============================")
-        print(resume_extracted[:1500], "\n")
-
-        resume_vec = get_embedding(resume_extracted)
-
-        score = float(util.cos_sim(
-            torch.tensor(jd_vec),
-            torch.tensor(resume_vec)
-        ))
-
-        print(f"🔥 FINAL SIMILARITY SCORE = {score}")
-
-        results.append({
-            "fileName": f.filename,
-            "similarity": score,
-            "extracted": resume_extracted
-        })
-
-    results.sort(key=lambda x: x["similarity"], reverse=True)
-
-    collection.update_one(
-        {"pipelineRunId": runId},
-        {"$set": {"finalTopFive": results[:5]}}
-    )
-
-    return results[:5], runId
-
-
-# ---------------------------------------------------
-# LLM Resume Validator (uses your existing GPT API)
-# ---------------------------------------------------
-# ---------------------------------------------------
-# USE OLLAMA LLaMA FOR RESUME VALIDATION
-# ---------------------------------------------------
-async def llm_resume_validator(extractedText: str):
-    from ollama import Client
-    client = Client()
-
-    prompt = f"""
-    You are an expert resume validator.
-
-    Analyze the following resume text and identify:
-    - Employment date overlaps
-    - Missing education information
-    - Suspicious gaps
-    - Inconsistent job roles
-    - Fake looking patterns
-
-    Return ONLY this JSON:
-    {{
-        "status": "VALID" or "INVALID",
-        "issues": [...],
-        "explanation": "..."
-    }}
-
-    Resume Text:
-    {extractedText}
-    """
-
+def extract_text_from_txt(file_obj):
+    """Extract text from TXT file"""
     try:
-        res = client.chat(
-            model="llama3.2",
-            messages=[{"role": "user", "content": prompt}],
-            format="json"        # <-- THIS FORCES STRICT JSON
-        )
-
-        raw = res["message"]["content"]
-
-        # Now we can parse safely
-        import json
-        return json.loads(raw)
-
+        content = file_obj.read()
+        if isinstance(content, bytes):
+            content = content.decode('utf-8')
+        return content.strip()
     except Exception as e:
-        return {
-            "status": "INVALID",
-            "issues": [f"Model error: {str(e)}"],
-            "explanation": "Could not analyze resume"
-        }
+        print(f"❌ TXT extraction error: {e}")
+        return ""
 
+# ------------------------------------------------
+# AI CV VALIDATION WITH OPENAI
+# ------------------------------------------------
 
-# ---------------------------------------------------
-# LLM Education Certificate Validator
-# ---------------------------------------------------
-async def llm_education_validator(extractedText: str, candidate: dict):
-    """
-    Validates education certificate using LLM
-    """
-    from ollama import Client
-    client = Client()
-
-    candidateName = f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip()
+async def extract_structured_cv_data(cv_text: str) -> Dict:
+    """Extract structured data from CV using OpenAI GPT-4o mini"""
+    if not openai_client:
+        raise Exception("OpenAI client not configured")
     
-    prompt = f"""
-    You are an expert education certificate validator.
-
-    Analyze the following education certificate text for candidate: {candidateName}
-
-    Check for:
-    - Valid institution name and accreditation
-    - Proper certificate format and structure
-    - Consistent dates and academic years
-    - Authentic looking signatures and seals
-    - Matching candidate name (case-insensitive)
-    - Valid degree/course information
-    - Suspicious or fake patterns
-
-    Return ONLY this JSON:
-    {{
-        "status": "VALID" or "INVALID",
-        "institutionName": "extracted institution name",
-        "degreeName": "extracted degree/course name",
-        "graduationYear": "extracted year",
-        "candidateNameMatch": true/false,
-        "issues": [...],
-        "explanation": "detailed analysis"
-    }}
-
-    Certificate Text:
-    {extractedText}
-    """
-
     try:
-        res = client.chat(
-            model="llama3.2",
-            messages=[{"role": "user", "content": prompt}],
-            format="json"
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert HR analyst. Extract structured information from CVs/resumes in a comprehensive format."
+                },
+                {
+                    "role": "user",
+                    "content": f"""Extract comprehensive information from this CV/Resume:
+
+{cv_text}
+
+Focus on:
+1. Personal Information (name, contact details)
+2. Technical Skills (programming languages, frameworks, tools, databases)
+3. Professional Experience (companies, roles, duration, responsibilities)
+4. Education (degrees, institutions, years)
+5. Projects and achievements
+6. Certifications
+7. Years of total experience"""
+                }
+            ],
+            functions=[{
+                "name": "extract_cv_data",
+                "description": "Extract structured data from CV/Resume",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "personal_info": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "email": {"type": "string"},
+                                "phone": {"type": "string"},
+                                "location": {"type": "string"}
+                            }
+                        },
+                        "technical_skills": {
+                            "type": "object",
+                            "properties": {
+                                "programming_languages": {"type": "array", "items": {"type": "string"}},
+                                "frameworks": {"type": "array", "items": {"type": "string"}},
+                                "databases": {"type": "array", "items": {"type": "string"}},
+                                "tools": {"type": "array", "items": {"type": "string"}},
+                                "cloud_platforms": {"type": "array", "items": {"type": "string"}},
+                                "other_skills": {"type": "array", "items": {"type": "string"}}
+                            }
+                        },
+                        "experience": {
+                            "type": "object",
+                            "properties": {
+                                "total_years": {"type": "number"},
+                                "positions": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "company": {"type": "string"},
+                                            "role": {"type": "string"},
+                                            "duration": {"type": "string"},
+                                            "responsibilities": {"type": "array", "items": {"type": "string"}},
+                                            "technologies": {"type": "array", "items": {"type": "string"}}
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "education": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "degree": {"type": "string"},
+                                    "institution": {"type": "string"},
+                                    "year": {"type": "string"},
+                                    "field": {"type": "string"}
+                                }
+                            }
+                        },
+                        "projects": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "description": {"type": "string"},
+                                    "technologies": {"type": "array", "items": {"type": "string"}}
+                                }
+                            }
+                        },
+                        "certifications": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["technical_skills", "experience", "education"]
+                }
+            }],
+            function_call={"name": "extract_cv_data"},
+            temperature=0.1
         )
+        
+        function_call = response.choices[0].message.function_call
+        if function_call:
+            return json.loads(function_call.arguments)
+        else:
+            raise Exception("No structured data extracted")
+            
+    except Exception as e:
+        print(f"❌ CV extraction error: {e}")
+        raise Exception(f"Failed to extract CV data: {str(e)}")
 
-        raw = res["message"]["content"]
-        import json
-        return json.loads(raw)
+async def extract_structured_jd_data(jd_text: str) -> Dict:
+    """Extract structured data from Job Description using OpenAI GPT-4o mini"""
+    if not openai_client:
+        raise Exception("OpenAI client not configured")
+    
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert HR analyst. Extract structured requirements from job descriptions."
+                },
+                {
+                    "role": "user",
+                    "content": f"""Extract comprehensive requirements from this Job Description:
 
+{jd_text}
+
+Focus on:
+1. Required technical skills (must-have vs nice-to-have)
+2. Experience requirements (years, specific technologies)
+3. Educational qualifications
+4. Role responsibilities
+5. Required tools and technologies"""
+                }
+            ],
+            functions=[{
+                "name": "extract_jd_requirements",
+                "description": "Extract structured requirements from Job Description",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_title": {"type": "string"},
+                        "required_skills": {
+                            "type": "object",
+                            "properties": {
+                                "programming_languages": {"type": "array", "items": {"type": "string"}},
+                                "frameworks": {"type": "array", "items": {"type": "string"}},
+                                "databases": {"type": "array", "items": {"type": "string"}},
+                                "tools": {"type": "array", "items": {"type": "string"}},
+                                "cloud_platforms": {"type": "array", "items": {"type": "string"}},
+                                "other_skills": {"type": "array", "items": {"type": "string"}}
+                            }
+                        },
+                        "nice_to_have_skills": {
+                            "type": "object",
+                            "properties": {
+                                "programming_languages": {"type": "array", "items": {"type": "string"}},
+                                "frameworks": {"type": "array", "items": {"type": "string"}},
+                                "databases": {"type": "array", "items": {"type": "string"}},
+                                "tools": {"type": "array", "items": {"type": "string"}},
+                                "cloud_platforms": {"type": "array", "items": {"type": "string"}},
+                                "other_skills": {"type": "array", "items": {"type": "string"}}
+                            }
+                        },
+                        "experience_requirements": {
+                            "type": "object",
+                            "properties": {
+                                "minimum_years": {"type": "number"},
+                                "preferred_years": {"type": "number"},
+                                "specific_experience": {"type": "array", "items": {"type": "string"}}
+                            }
+                        },
+                        "education_requirements": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        },
+                        "responsibilities": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["required_skills", "experience_requirements"]
+                }
+            }],
+            function_call={"name": "extract_jd_requirements"},
+            temperature=0.1
+        )
+        
+        function_call = response.choices[0].message.function_call
+        if function_call:
+            return json.loads(function_call.arguments)
+        else:
+            raise Exception("No structured data extracted")
+            
+    except Exception as e:
+        print(f"❌ JD extraction error: {e}")
+        raise Exception(f"Failed to extract JD data: {str(e)}")
+
+async def analyze_cv_vs_jd(cv_data: Dict, jd_data: Dict) -> Dict:
+    """Analyze CV against JD requirements and provide scoring"""
+    if not openai_client:
+        raise Exception("OpenAI client not configured")
+    
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert HR analyst. Analyze how well a candidate's CV matches job requirements and provide detailed scoring and recommendations."
+                },
+                {
+                    "role": "user",
+                    "content": f"""Analyze this candidate's CV against the job requirements:
+
+CANDIDATE CV DATA:
+{json.dumps(cv_data, indent=2)}
+
+JOB REQUIREMENTS:
+{json.dumps(jd_data, indent=2)}
+
+Provide comprehensive analysis with:
+1. Overall match score (0-100)
+2. Skills analysis (matching vs missing)
+3. Experience analysis
+4. Strengths and weaknesses
+5. Recommendations"""
+                }
+            ],
+            functions=[{
+                "name": "analyze_candidate_match",
+                "description": "Analyze candidate CV against job requirements",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "overall_score": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "Overall match score (0-100)"
+                        },
+                        "skills_analysis": {
+                            "type": "object",
+                            "properties": {
+                                "matching_skills": {"type": "array", "items": {"type": "string"}},
+                                "missing_critical_skills": {"type": "array", "items": {"type": "string"}},
+                                "missing_nice_to_have": {"type": "array", "items": {"type": "string"}},
+                                "additional_skills": {"type": "array", "items": {"type": "string"}},
+                                "skills_score": {"type": "number", "minimum": 0, "maximum": 100}
+                            }
+                        },
+                        "experience_analysis": {
+                            "type": "object",
+                            "properties": {
+                                "meets_minimum_experience": {"type": "boolean"},
+                                "total_experience_years": {"type": "number"},
+                                "relevant_experience": {"type": "array", "items": {"type": "string"}},
+                                "experience_score": {"type": "number", "minimum": 0, "maximum": 100}
+                            }
+                        },
+                        "education_analysis": {
+                            "type": "object",
+                            "properties": {
+                                "meets_requirements": {"type": "boolean"},
+                                "education_details": {"type": "array", "items": {"type": "string"}},
+                                "education_score": {"type": "number", "minimum": 0, "maximum": 100}
+                            }
+                        },
+                        "strengths": {"type": "array", "items": {"type": "string"}},
+                        "weaknesses": {"type": "array", "items": {"type": "string"}},
+                        "recommendations": {"type": "array", "items": {"type": "string"}},
+                        "hiring_recommendation": {
+                            "type": "string",
+                            "enum": ["STRONG_HIRE", "HIRE", "MAYBE", "NO_HIRE"]
+                        }
+                    },
+                    "required": ["overall_score", "skills_analysis", "experience_analysis", "hiring_recommendation"]
+                }
+            }],
+            function_call={"name": "analyze_candidate_match"},
+            temperature=0.2
+        )
+        
+        function_call = response.choices[0].message.function_call
+        if function_call:
+            return json.loads(function_call.arguments)
+        else:
+            raise Exception("No analysis generated")
+            
+    except Exception as e:
+        print(f"❌ Analysis error: {e}")
+        raise Exception(f"Failed to analyze CV vs JD: {str(e)}")
+
+# ------------------------------------------------
+# MAIN CV VALIDATION FUNCTION
+# ------------------------------------------------
+
+async def validate_cv_against_jd(cv_file, jd_file) -> Dict:
+    """
+    Main function to validate CV against JD
+    Returns comprehensive analysis and scoring
+    """
+    try:
+        # Extract text from files
+        cv_text = ""
+        jd_text = ""
+        
+        # Handle CV file
+        if hasattr(cv_file, 'filename'):
+            filename = cv_file.filename.lower()
+            if filename.endswith('.pdf'):
+                cv_text = extract_text_from_pdf(cv_file.file)
+            elif filename.endswith('.docx'):
+                cv_text = extract_text_from_docx(cv_file.file)
+            elif filename.endswith('.txt'):
+                cv_text = extract_text_from_txt(cv_file.file)
+        else:
+            cv_text = str(cv_file)  # Text input
+        
+        # Handle JD file
+        if hasattr(jd_file, 'filename'):
+            filename = jd_file.filename.lower()
+            if filename.endswith('.pdf'):
+                jd_text = extract_text_from_pdf(jd_file.file)
+            elif filename.endswith('.docx'):
+                jd_text = extract_text_from_docx(jd_file.file)
+            elif filename.endswith('.txt'):
+                jd_text = extract_text_from_txt(jd_file.file)
+        else:
+            jd_text = str(jd_file)  # Text input
+        
+        if not cv_text or len(cv_text.strip()) < 50:
+            raise Exception("Could not extract meaningful text from CV")
+        
+        if not jd_text or len(jd_text.strip()) < 50:
+            raise Exception("Could not extract meaningful text from JD")
+        
+        # Extract structured data
+        print("🔍 Extracting structured CV data...")
+        cv_data = await extract_structured_cv_data(cv_text)
+        
+        print("🔍 Extracting structured JD data...")
+        jd_data = await extract_structured_jd_data(jd_text)
+        
+        # Analyze match
+        print("🔍 Analyzing CV vs JD match...")
+        analysis = await analyze_cv_vs_jd(cv_data, jd_data)
+        
+        # Compile final result
+        result = {
+            "validation_id": str(uuid.uuid4()),
+            "timestamp": datetime.utcnow().isoformat(),
+            "cv_data": cv_data,
+            "jd_data": jd_data,
+            "analysis": analysis,
+            "status": "COMPLETED",
+            "method": "OpenAI-GPT4o-mini"
+        }
+        
+        return result
+        
     except Exception as e:
         return {
-            "status": "INVALID",
-            "institutionName": "",
-            "degreeName": "",
-            "graduationYear": "",
-            "candidateNameMatch": False,
-            "issues": [f"Model error: {str(e)}"],
-            "explanation": "Could not analyze education certificate"
+            "validation_id": str(uuid.uuid4()),
+            "timestamp": datetime.utcnow().isoformat(),
+            "status": "FAILED",
+            "error": str(e),
+            "method": "OpenAI-GPT4o-mini"
         }

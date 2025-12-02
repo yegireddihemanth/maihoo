@@ -32,7 +32,7 @@ from fastapi.encoders import jsonable_encoder
 from datetime import datetime, timezone
 from bson import ObjectId
 from fastapi import UploadFile, File, Form, Depends, HTTPException
-from utils.ai_utils import generate_resume_embeddings_and_rank
+# AI utilities removed - new approach to be implemented
 from utils.email_utils import *
 
 # -------------------------------
@@ -4210,28 +4210,7 @@ async def uploadLogo(
 
 
 
-@app.post("/secure/ai_resume_selection")
-async def ai_resume_selection(
-    jd: str = Form(...),
-    resumes: list[UploadFile] = File(...),
-    user: dict = Depends(requireAuth)
-):
-    if len(resumes) == 0:
-        raise HTTPException(status_code=400, detail="No resumes uploaded")
-    if len(resumes) > 100:
-        raise HTTPException(status_code=400, detail="Maximum 100 resumes allowed")
-
-    # FIXED CALL (correct order)
-    topFive, pipelineRunId = await generate_resume_embeddings_and_rank(
-        resumes,
-        jd
-    )
-
-    return {
-        "message": "AI Resume Selection Completed",
-        "pipelineRunId": pipelineRunId,
-        "topFiveResumes": topFive
-    }
+# AI resume selection endpoint removed - new approach to be implemented
 
 
 
@@ -6115,7 +6094,6 @@ async def getInternalVerificationDetails(verificationId: str, user: dict = Depen
     internal_checks = [
         "address_verification",
         "education_check_manual", 
-        "education_check_ai",
         "supervisory_check",
         "employment_history_manual"
     ]
@@ -6135,7 +6113,7 @@ async def getInternalVerificationDetails(verificationId: str, user: dict = Depen
                         "submittedAt": check.get("submittedAt"),
                         "updatedBy": check.get("updatedBy"),
                         "attachments": check.get("attachments", []),
-                        "requiresManualVerification": checkName != "education_check_ai"
+                        "requiresManualVerification": True  # All checks require manual verification now
                     })
         
         if stageInternals:
@@ -6248,3 +6226,397 @@ async def uploadEducationCertificate(
             "filePath": file_path
         }
     )
+
+
+# ------------------------------------------------
+# 📌 AI CV VALIDATION ENDPOINT
+# ------------------------------------------------
+
+@app.post("/secure/ai_cv_validation")
+async def ai_cv_validation(
+    verificationId: str = Form(...),
+    cv_file: UploadFile = File(...),
+    jd_file: UploadFile = File(None),
+    jd_text: str = Form(None),
+    user: dict = Depends(requireAuth)
+):
+    """
+    AI CV Validation - Analyze CV against Job Description using AI
+    
+    Parameters:
+    - verificationId: The verification record ID
+    - cv_file: Candidate's CV/Resume file (PDF/DOCX)
+    - jd_file: Job Description file (PDF/DOCX) - optional
+    - jd_text: Job Description as text - optional (used if no file)
+    """
+    
+    # Validation
+    if not cv_file.filename.lower().endswith(('.pdf', '.docx')):
+        raise HTTPException(status_code=400, detail="CV file must be PDF or DOCX")
+    
+    if not jd_file and not jd_text:
+        raise HTTPException(status_code=400, detail="Either JD file or JD text is required")
+    
+    if jd_file and not jd_file.filename.lower().endswith(('.pdf', '.docx', '.txt')):
+        raise HTTPException(status_code=400, detail="JD file must be PDF, DOCX, or TXT")
+    
+    try:
+        # Verify verification record exists and user has access
+        verificationObjId = ObjectId(verificationId)
+        verification = await verificationsCol.find_one({"_id": verificationObjId})
+        
+        if not verification:
+            raise HTTPException(status_code=404, detail="Verification record not found")
+        
+        # Get candidate details
+        candidateId = verification.get("candidateId")
+        candidate = await candidatesCol.find_one({"_id": ObjectId(candidateId)})
+        
+        if not candidate:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        
+        candidateOrgId = str(candidate.get("organizationId"))
+        
+        # Role-based access control
+        role = user.get("role")
+        userEmail = user.get("email", "").lower().strip()
+        userOrgId = str(user.get("organizationId"))
+        accessible = [str(x) for x in user.get("accessibleOrganizations", [])]
+        
+        allowed = False
+        
+        if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+            allowed = True
+        elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
+            allowed = True
+        elif role == "SUPER_ADMIN_HELPER":
+            if candidateOrgId in accessible:
+                allowed = True
+        elif role in ["ORG_HR", "SPOC"]:
+            if candidateOrgId == userOrgId:
+                allowed = True
+        elif role == "HELPER":
+            if candidateOrgId == userOrgId and candidate.get("createdBy", "").lower().strip() == userEmail:
+                allowed = True
+        
+        if not allowed:
+            raise HTTPException(status_code=403, detail="You are not authorized to perform AI CV validation for this candidate")
+        
+        # Prepare JD input
+        jd_input = jd_file if jd_file else jd_text
+        
+        # Perform AI CV validation
+        from utils.ai_utils import validate_cv_against_jd
+        
+        print(f"🔍 Starting AI CV validation for verification {verificationId}")
+        validation_result = await validate_cv_against_jd(cv_file, jd_input)
+        
+        if validation_result.get("status") == "FAILED":
+            raise HTTPException(status_code=500, detail=f"AI validation failed: {validation_result.get('error')}")
+        
+        # Store AI analysis results but keep status as PENDING for manual review
+        analysis = validation_result.get("analysis", {})
+        
+        # Find the ai_cv_validation check in the verification stages
+        stages = verification.get("stages", {})
+        updated = False
+        
+        for stage_name, checks in stages.items():
+            for check in checks:
+                if check.get("checkName") == "ai_cv_validation":
+                    # Update the check with AI results but keep PENDING status
+                    check.update({
+                        "status": "PENDING",  # Keep PENDING for manual review
+                        "aiAnalysisCompleted": True,  # Flag that AI analysis is done
+                        "aiAnalysisAt": datetime.now(timezone.utc),
+                        "aiAnalysisBy": user.get("email"),
+                        "aiAnalysis": {
+                            "overall_score": analysis.get("overall_score", 0),
+                            "skills_analysis": analysis.get("skills_analysis", {}),
+                            "experience_analysis": analysis.get("experience_analysis", {}),
+                            "education_analysis": analysis.get("education_analysis", {}),
+                            "strengths": analysis.get("strengths", []),
+                            "weaknesses": analysis.get("weaknesses", []),
+                            "recommendations": analysis.get("recommendations", []),
+                            "hiring_recommendation": analysis.get("hiring_recommendation", "REVIEW"),
+                            "validation_id": validation_result.get("validation_id"),
+                            "timestamp": validation_result.get("timestamp"),
+                            "method": validation_result.get("method")
+                        },
+                        "remarks": f"AI analysis completed. Overall Score: {analysis.get('overall_score', 0)}/100. Recommendation: {analysis.get('hiring_recommendation', 'REVIEW')}. Awaiting manual review and submission."
+                    })
+                    updated = True
+                    break
+            if updated:
+                break
+        
+        if not updated:
+            raise HTTPException(status_code=400, detail="AI CV validation check not found in verification stages")
+        
+        # Save updated verification
+        await verificationsCol.update_one(
+            {"_id": verificationObjId},
+            {"$set": {"stages": stages}}
+        )
+        
+        # Log activity
+        await logActivity(
+            user,
+            "AI CV Analysis Completed",
+            f"AI analysis completed for candidate {candidate.get('firstName', '')} {candidate.get('lastName', '')} (Score: {analysis.get('overall_score', 0)}/100). Awaiting manual review.",
+            "Success"
+        )
+        
+        return JSONResponse(
+            status_code=200,
+            content=jsonable_encoder({
+                "message": "AI CV analysis completed successfully. Please review and submit the check.",
+                "verificationId": verificationId,
+                "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
+                "analysis": {
+                    "overall_score": analysis.get("overall_score", 0),
+                    "hiring_recommendation": analysis.get("hiring_recommendation", "REVIEW"),
+                    "skills_analysis": {
+                        "matching_skills": analysis.get("skills_analysis", {}).get("matching_skills", []),
+                        "missing_critical_skills": analysis.get("skills_analysis", {}).get("missing_critical_skills", []),
+                        "skills_score": analysis.get("skills_analysis", {}).get("skills_score", 0)
+                    },
+                    "experience_analysis": {
+                        "meets_minimum_experience": analysis.get("experience_analysis", {}).get("meets_minimum_experience", False),
+                        "total_experience_years": analysis.get("experience_analysis", {}).get("total_experience_years", 0),
+                        "experience_score": analysis.get("experience_analysis", {}).get("experience_score", 0)
+                    },
+                    "strengths": analysis.get("strengths", []),
+                    "weaknesses": analysis.get("weaknesses", []),
+                    "recommendations": analysis.get("recommendations", [])
+                },
+                "validation_details": {
+                    "validation_id": validation_result.get("validation_id"),
+                    "timestamp": validation_result.get("timestamp"),
+                    "method": validation_result.get("method")
+                }
+            })
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        await logActivity(
+            user,
+            "AI CV Validation Failed",
+            f"Failed to complete AI CV validation: {str(e)}",
+            "Error"
+        )
+        raise HTTPException(status_code=500, detail=f"AI CV validation failed: {str(e)}")
+
+
+@app.get("/secure/ai_cv_validation_results/{verificationId}")
+async def get_ai_cv_validation_results(
+    verificationId: str,
+    user: dict = Depends(requireAuth)
+):
+    """
+    Get AI CV validation results for a verification record
+    """
+    try:
+        verificationObjId = ObjectId(verificationId)
+        verification = await verificationsCol.find_one({"_id": verificationObjId})
+        
+        if not verification:
+            raise HTTPException(status_code=404, detail="Verification record not found")
+        
+        # Get candidate details for access control
+        candidateId = verification.get("candidateId")
+        candidate = await candidatesCol.find_one({"_id": ObjectId(candidateId)})
+        
+        if not candidate:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        
+        candidateOrgId = str(candidate.get("organizationId"))
+        
+        # Role-based access control
+        role = user.get("role")
+        userEmail = user.get("email", "").lower().strip()
+        userOrgId = str(user.get("organizationId"))
+        accessible = [str(x) for x in user.get("accessibleOrganizations", [])]
+        
+        allowed = False
+        
+        if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+            allowed = True
+        elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
+            allowed = True
+        elif role == "SUPER_ADMIN_HELPER":
+            if candidateOrgId in accessible:
+                allowed = True
+        elif role in ["ORG_HR", "SPOC"]:
+            if candidateOrgId == userOrgId:
+                allowed = True
+        elif role == "HELPER":
+            if candidateOrgId == userOrgId and candidate.get("createdBy", "").lower().strip() == userEmail:
+                allowed = True
+        
+        if not allowed:
+            raise HTTPException(status_code=403, detail="You are not authorized to view AI CV validation results for this candidate")
+        
+        # Find AI CV validation results
+        stages = verification.get("stages", {})
+        ai_results = None
+        
+        for stage_name, checks in stages.items():
+            for check in checks:
+                if check.get("checkName") == "ai_cv_validation":
+                    ai_results = check.get("aiAnalysis")
+                    break
+            if ai_results:
+                break
+        
+        if not ai_results:
+            raise HTTPException(status_code=404, detail="AI CV validation results not found")
+        
+        return JSONResponse(
+            status_code=200,
+            content=jsonable_encoder({
+                "verificationId": verificationId,
+                "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
+                "candidateEmail": candidate.get("email", ""),
+                "aiAnalysis": ai_results
+            })
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get AI CV validation results: {str(e)}")
+
+
+@app.post("/secure/submit_ai_cv_validation")
+async def submit_ai_cv_validation(
+    verificationId: str = Form(...),
+    final_status: str = Form(...),  # "COMPLETED" or "FAILED"
+    staff_remarks: str = Form(""),
+    user: dict = Depends(requireAuth)
+):
+    """
+    Submit final decision for AI CV validation after reviewing AI analysis
+    
+    Parameters:
+    - verificationId: The verification record ID
+    - final_status: "COMPLETED" or "FAILED" 
+    - staff_remarks: Additional remarks from staff review
+    """
+    
+    if final_status not in ["COMPLETED", "FAILED"]:
+        raise HTTPException(status_code=400, detail="final_status must be 'COMPLETED' or 'FAILED'")
+    
+    try:
+        verificationObjId = ObjectId(verificationId)
+        verification = await verificationsCol.find_one({"_id": verificationObjId})
+        
+        if not verification:
+            raise HTTPException(status_code=404, detail="Verification record not found")
+        
+        # Get candidate details for access control
+        candidateId = verification.get("candidateId")
+        candidate = await candidatesCol.find_one({"_id": ObjectId(candidateId)})
+        
+        if not candidate:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        
+        candidateOrgId = str(candidate.get("organizationId"))
+        
+        # Role-based access control (same as other endpoints)
+        role = user.get("role")
+        userEmail = user.get("email", "").lower().strip()
+        userOrgId = str(user.get("organizationId"))
+        accessible = [str(x) for x in user.get("accessibleOrganizations", [])]
+        
+        allowed = False
+        
+        if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+            allowed = True
+        elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
+            allowed = True
+        elif role == "SUPER_ADMIN_HELPER":
+            if candidateOrgId in accessible:
+                allowed = True
+        elif role in ["ORG_HR", "SPOC"]:
+            if candidateOrgId == userOrgId:
+                allowed = True
+        elif role == "HELPER":
+            if candidateOrgId == userOrgId and candidate.get("createdBy", "").lower().strip() == userEmail:
+                allowed = True
+        
+        if not allowed:
+            raise HTTPException(status_code=403, detail="You are not authorized to submit AI CV validation for this candidate")
+        
+        # Find and update the AI CV validation check
+        stages = verification.get("stages", {})
+        updated = False
+        
+        for stage_name, checks in stages.items():
+            for check in checks:
+                if check.get("checkName") == "ai_cv_validation":
+                    # Verify AI analysis was completed
+                    if not check.get("aiAnalysisCompleted"):
+                        raise HTTPException(status_code=400, detail="AI analysis must be completed before submission")
+                    
+                    # Update with final status and staff decision
+                    ai_score = check.get("aiAnalysis", {}).get("overall_score", 0)
+                    ai_recommendation = check.get("aiAnalysis", {}).get("hiring_recommendation", "REVIEW")
+                    
+                    final_remarks = f"AI Score: {ai_score}/100, AI Recommendation: {ai_recommendation}"
+                    if staff_remarks:
+                        final_remarks += f". Staff Review: {staff_remarks}"
+                    
+                    check.update({
+                        "status": final_status,
+                        "submittedAt": datetime.now(timezone.utc),
+                        "updatedBy": user.get("email"),
+                        "staffRemarks": staff_remarks,
+                        "finalDecision": final_status,
+                        "remarks": final_remarks
+                    })
+                    updated = True
+                    break
+            if updated:
+                break
+        
+        if not updated:
+            raise HTTPException(status_code=400, detail="AI CV validation check not found or not ready for submission")
+        
+        # Save updated verification
+        await verificationsCol.update_one(
+            {"_id": verificationObjId},
+            {"$set": {"stages": stages}}
+        )
+        
+        # Log activity
+        await logActivity(
+            user,
+            f"AI CV Validation {final_status}",
+            f"Staff submitted AI CV validation as {final_status} for candidate {candidate.get('firstName', '')} {candidate.get('lastName', '')}",
+            "Success"
+        )
+        
+        return JSONResponse(
+            status_code=200,
+            content=jsonable_encoder({
+                "message": f"AI CV validation submitted as {final_status} successfully",
+                "verificationId": verificationId,
+                "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
+                "finalStatus": final_status,
+                "staffRemarks": staff_remarks
+            })
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        await logActivity(
+            user,
+            "AI CV Validation Submission Failed",
+            f"Failed to submit AI CV validation: {str(e)}",
+            "Error"
+        )
+        raise HTTPException(status_code=500, detail=f"Failed to submit AI CV validation: {str(e)}")
