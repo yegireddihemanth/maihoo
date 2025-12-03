@@ -7495,3 +7495,267 @@ async def submit_ai_education_validation(
             "Error"
         )
         raise HTTPException(status_code=500, detail=f"Failed to submit AI education validation: {str(e)}")
+
+
+# ================================================
+# 📌 AI RESUME SCREENING ENDPOINT
+# ================================================
+
+@app.post("/secure/ai_resume_screening")
+async def ai_resume_screening(
+    jd_file: UploadFile = File(...),
+    resume_files: List[UploadFile] = File(...),
+    top_n: int = Form(5),
+    user: dict = Depends(requireAuth)
+):
+    """
+    AI-powered resume screening using OpenAI embeddings
+    
+    Parameters:
+    - jd_file: Job description file (PDF/DOCX/TXT)
+    - resume_files: List of resume files (up to 100, PDF/DOCX/TXT)
+    - top_n: Number of best resumes to return (default: 5, max: 20)
+    
+    Returns:
+    - Top N resumes ranked by match score
+    - Detailed analysis for each: strengths, weaknesses, skills match, recommendation
+    """
+    
+    # Import resume screening utilities
+    from utils.resume_screening import screen_resumes
+    
+    # Validate inputs
+    if not resume_files or len(resume_files) == 0:
+        raise HTTPException(status_code=400, detail="No resume files uploaded")
+    
+    if len(resume_files) > 100:
+        raise HTTPException(status_code=400, detail="Maximum 100 resumes allowed")
+    
+    if top_n < 1:
+        raise HTTPException(status_code=400, detail="top_n must be at least 1")
+    
+    if top_n > 20:
+        raise HTTPException(status_code=400, detail="top_n cannot exceed 20")
+    
+    # Validate JD file
+    jd_filename = jd_file.filename.lower()
+    if not (jd_filename.endswith('.pdf') or jd_filename.endswith('.docx') or 
+            jd_filename.endswith('.doc') or jd_filename.endswith('.txt')):
+        raise HTTPException(status_code=400, detail="JD file must be PDF, DOCX, or TXT")
+    
+    # Validate resume files
+    for resume in resume_files:
+        filename = resume.filename.lower()
+        if not (filename.endswith('.pdf') or filename.endswith('.docx') or 
+                filename.endswith('.doc') or filename.endswith('.txt')):
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid file format: {resume.filename}. Only PDF, DOCX, and TXT allowed"
+            )
+    
+    try:
+        # Log activity
+        await logActivity(
+            user,
+            "AI Resume Screening Started",
+            f"Processing {len(resume_files)} resumes against JD: {jd_file.filename}",
+            "Started"
+        )
+        
+        # Read JD file
+        jd_content = await jd_file.read()
+        jd_tuple = (jd_content, jd_file.filename)
+        
+        # Read all resume files
+        resume_tuples = []
+        for resume in resume_files:
+            content = await resume.read()
+            resume_tuples.append((content, resume.filename))
+        
+        # Process resumes
+        print(f"\n🚀 Starting resume screening: {len(resume_files)} resumes, top {top_n}")
+        results = await screen_resumes(resume_tuples, jd_tuple, top_n)
+        
+        # Log success
+        await logActivity(
+            user,
+            "AI Resume Screening Completed",
+            f"Successfully screened {results['total_resumes_processed']} resumes. Top {len(results['top_resumes'])} returned.",
+            "Success"
+        )
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "message": "Resume screening completed successfully",
+                "results": results,
+                "user": user.get("email")
+            }
+        )
+        
+    except ValueError as e:
+        await logActivity(
+            user,
+            "AI Resume Screening Failed",
+            f"Validation error: {str(e)}",
+            "Error"
+        )
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    except Exception as e:
+        await logActivity(
+            user,
+            "AI Resume Screening Failed",
+            f"Error: {str(e)}",
+            "Error"
+        )
+        raise HTTPException(status_code=500, detail=f"Resume screening failed: {str(e)}")
+
+
+# ================================================
+# 📌 ENHANCED AI RESUME SCREENING ENDPOINT
+# ================================================
+
+@app.post("/secure/ai_resume_screening_enhanced")
+async def ai_resume_screening_enhanced(
+    jd_file: UploadFile = File(...),
+    resume_files: List[UploadFile] = File(...),
+    top_n: int = Form(5),
+    must_have_requirements: str = Form(""),  # Comma-separated list
+    nice_to_have: str = Form(""),  # Comma-separated list
+    min_embedding_score: float = Form(0.5),
+    embedding_weight: float = Form(0.3),
+    llm_weight: float = Form(0.7),
+    user: dict = Depends(requireAuth)
+):
+    """
+    Enhanced AI-powered resume screening with requirement checking and weighted scoring
+    
+    Parameters:
+    - jd_file: Job description file (PDF/DOCX/TXT)
+    - resume_files: List of resume files (up to 100, PDF/DOCX/TXT)
+    - top_n: Number of best resumes to return (default: 5, max: 20)
+    - must_have_requirements: Comma-separated critical requirements (e.g., "5+ years Python,AWS certification")
+    - nice_to_have: Comma-separated preferred requirements (e.g., "Docker,Kubernetes")
+    - min_embedding_score: Minimum similarity threshold (default: 0.5, range: 0-1)
+    - embedding_weight: Weight for embedding score (default: 0.3, range: 0-1)
+    - llm_weight: Weight for LLM score (default: 0.7, range: 0-1)
+    
+    Returns:
+    - Top N resumes with enhanced analysis including requirement compliance
+    """
+    
+    # Import enhanced screening utilities
+    from utils.resume_screening_enhanced import screen_resumes_enhanced
+    
+    # Validate inputs
+    if not resume_files or len(resume_files) == 0:
+        raise HTTPException(status_code=400, detail="No resume files uploaded")
+    
+    if len(resume_files) > 100:
+        raise HTTPException(status_code=400, detail="Maximum 100 resumes allowed")
+    
+    if top_n < 1:
+        raise HTTPException(status_code=400, detail="top_n must be at least 1")
+    
+    if top_n > 20:
+        raise HTTPException(status_code=400, detail="top_n cannot exceed 20")
+    
+    if min_embedding_score < 0 or min_embedding_score > 1:
+        raise HTTPException(status_code=400, detail="min_embedding_score must be between 0 and 1")
+    
+    if embedding_weight < 0 or embedding_weight > 1:
+        raise HTTPException(status_code=400, detail="embedding_weight must be between 0 and 1")
+    
+    if llm_weight < 0 or llm_weight > 1:
+        raise HTTPException(status_code=400, detail="llm_weight must be between 0 and 1")
+    
+    if abs((embedding_weight + llm_weight) - 1.0) > 0.01:
+        raise HTTPException(status_code=400, detail="embedding_weight + llm_weight must equal 1.0")
+    
+    # Validate JD file
+    jd_filename = jd_file.filename.lower()
+    if not (jd_filename.endswith('.pdf') or jd_filename.endswith('.docx') or 
+            jd_filename.endswith('.doc') or jd_filename.endswith('.txt')):
+        raise HTTPException(status_code=400, detail="JD file must be PDF, DOCX, or TXT")
+    
+    # Validate resume files
+    for resume in resume_files:
+        filename = resume.filename.lower()
+        if not (filename.endswith('.pdf') or filename.endswith('.docx') or 
+                filename.endswith('.doc') or filename.endswith('.txt')):
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid file format: {resume.filename}. Only PDF, DOCX, and TXT allowed"
+            )
+    
+    # Parse requirements
+    must_have_list = [req.strip() for req in must_have_requirements.split(',') if req.strip()] if must_have_requirements else None
+    nice_to_have_list = [req.strip() for req in nice_to_have.split(',') if req.strip()] if nice_to_have else None
+    
+    try:
+        # Log activity
+        await logActivity(
+            user,
+            "Enhanced AI Resume Screening Started",
+            f"Processing {len(resume_files)} resumes with {len(must_have_list or [])} critical requirements",
+            "Started"
+        )
+        
+        # Read JD file
+        jd_content = await jd_file.read()
+        jd_tuple = (jd_content, jd_file.filename)
+        
+        # Read all resume files
+        resume_tuples = []
+        for resume in resume_files:
+            content = await resume.read()
+            resume_tuples.append((content, resume.filename))
+        
+        # Process resumes with enhanced screening
+        print(f"\n🚀 Starting enhanced resume screening: {len(resume_files)} resumes, top {top_n}")
+        results = await screen_resumes_enhanced(
+            resume_tuples,
+            jd_tuple,
+            top_n,
+            must_have_list,
+            nice_to_have_list,
+            min_embedding_score,
+            embedding_weight,
+            llm_weight
+        )
+        
+        # Log success
+        await logActivity(
+            user,
+            "Enhanced AI Resume Screening Completed",
+            f"Successfully screened {results['total_resumes_processed']} resumes. Top {len(results['top_resumes'])} returned.",
+            "Success"
+        )
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "message": "Enhanced resume screening completed successfully",
+                "results": results,
+                "user": user.get("email")
+            }
+        )
+        
+    except ValueError as e:
+        await logActivity(
+            user,
+            "Enhanced AI Resume Screening Failed",
+            f"Validation error: {str(e)}",
+            "Error"
+        )
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    except Exception as e:
+        await logActivity(
+            user,
+            "Enhanced AI Resume Screening Failed",
+            f"Error: {str(e)}",
+            "Error"
+        )
+        raise HTTPException(status_code=500, detail=f"Enhanced resume screening failed: {str(e)}")

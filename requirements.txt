@@ -1,24 +1,73 @@
-fastapi
-uvicorn
-motor
-pymongo
-pydantic
-python-dotenv
-PyJWT
-python-multipart
-google-auth
-google-auth-oauthlib
-google-api-python-client
-cloudinary
-google-genai 
-python-docx   
-PyPDF2
-sentence-transformers  
-cloudinary
-aiohttp
-ollama
-openai
-boto3
-pytesseract
-Pillow
-pdf2image
+# ============================================
+# Core FastAPI & Server
+# ============================================
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# ============================================
+# Database
+# ============================================
+motor>=3.3.0
+pymongo>=4.5.0
+
+# ============================================
+# Data Validation & Models
+# ============================================
+pydantic>=2.4.0
+
+# ============================================
+# Authentication & Security
+# ============================================
+PyJWT>=2.8.0
+python-dotenv>=1.0.0
+
+# ============================================
+# Google Services
+# ============================================
+google-auth>=2.23.0
+google-auth-oauthlib>=1.1.0
+google-api-python-client>=2.100.0
+google-genai>=0.2.0
+
+# ============================================
+# File Processing & Document Handling
+# ============================================
+python-docx>=1.0.0
+PyPDF2>=3.0.0
+Pillow>=10.0.0
+pdf2image>=1.16.0
+
+# ============================================
+# OCR & Image Processing
+# ============================================
+pytesseract>=0.3.10
+
+# ============================================
+# AI & Machine Learning
+# ============================================
+# OpenAI for embeddings and LLM analysis (REQUIRED for resume screening)
+openai>=1.3.0
+
+# NumPy for vector operations (REQUIRED for resume screening)
+numpy>=1.24.0
+
+# Sentence transformers (optional, for local embeddings)
+sentence-transformers>=2.2.0
+
+# Ollama (optional, for local LLM)
+ollama>=0.1.0
+
+# ============================================
+# Cloud Services
+# ============================================
+# AWS S3 for resume storage
+boto3>=1.28.0
+
+# Cloudinary for image storage
+cloudinary>=1.36.0
+
+# ============================================
+# HTTP & Async
+# ============================================
+aiohttp>=3.9.0
