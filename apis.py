@@ -31,59 +31,10 @@ activityLogsCol = db["activityLogs"]   # <-- REQUIRED FOR LOGGING
 # ---------------------------------------------------
 async def verify_resume_validation(candidate: dict):
     """
-    1. Loads resume file path from candidate.resumePath  
-    2. Extracts text using ai_utils extractors  
-    3. Sends extracted resume text to LLaMA validator  
-    4. Returns COMPLETED or FAILED  
+    DEPRECATED: Use ai_cv_validation endpoint instead
+    This old check is no longer supported
     """
-
-    from utils.ai_utils import extract_text_from_pdf, extract_text_from_docx, llm_resume_validator
-
-    resumePath = candidate.get("resumePath")
-    if not resumePath:
-        return "FAILED", "Resume not uploaded"
-
-    ext = resumePath.split(".")[-1].lower()
-
-    try:
-        # -----------------------------------
-        # Extract resume text
-        # -----------------------------------
-        if ext == "pdf":
-            extractedText = extract_text_from_pdf(resumePath)
-        elif ext == "docx":
-            extractedText = extract_text_from_docx(resumePath)
-        else:
-            return "FAILED", f"Unsupported file type: {ext}"
-
-        if not extractedText or len(extractedText.strip()) < 20:
-            return "FAILED", "Could not extract any meaningful text"
-
-        # -----------------------------------
-        # Validate resume using LLaMA
-        # -----------------------------------
-        validation = await llm_resume_validator(extractedText)
-
-        # validation = {
-        #     "status": "VALID" | "INVALID",
-        #     "issues": [...],
-        #     "explanation": "..."
-        # }
-
-        if validation.get("status") == "VALID":
-            return "COMPLETED", {
-                "message": "Resume validation passed",
-                "details": validation
-            }
-
-        else:
-            return "FAILED", {
-                "message": "Resume validation failed",
-                "details": validation
-            }
-
-    except Exception as e:
-        return "FAILED", f"Resume validation error: {str(e)}"
+    return "FAILED", "This check is deprecated. Use 'ai_cv_validation' endpoint instead."
 
 
 # ---------------------------------------------------
@@ -299,7 +250,23 @@ async def verify_ai_cv_validation(candidate: dict):
         "candidateEmail": candidate.get("email", ""),
         "requiresManualVerification": True,
         "requiresAIAnalysis": True,
-        "instructions": "Upload candidate's CV/Resume and Job Description for AI-powered analysis and scoring"
+        "instructions": "Upload candidate's CV/Resume for AI-powered authenticity analysis"
+    }
+
+
+async def verify_ai_education_validation(candidate: dict):
+    """
+    AI Education Validation check - manual process with AI assistance and OCR
+    Returns PENDING status as this requires manual verification through UI with AI analysis
+    """
+    return "PENDING", {
+        "message": "AI education validation pending manual verification with AI analysis",
+        "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
+        "candidateEmail": candidate.get("email", ""),
+        "requiresManualVerification": True,
+        "requiresAIAnalysis": True,
+        "requiresOCR": True,
+        "instructions": "Upload candidate's education certificate/marksheet (PDF/JPG/PNG) for AI-powered OCR extraction and validation"
     }
 
 
@@ -371,6 +338,9 @@ async def run_verification(check_type: str, candidate: dict):
     
     if check_type == "ai_cv_validation":
         return await verify_ai_cv_validation(candidate)
+    
+    if check_type == "ai_education_validation":
+        return await verify_ai_education_validation(candidate)
     
     if check_type == "supervisory_check":
         return await verify_supervisory_check(candidate)

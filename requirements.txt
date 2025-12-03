@@ -19,3 +19,6 @@ aiohttp
 ollama
 openai
 boto3
+pytesseract
+Pillow
+pdf2image

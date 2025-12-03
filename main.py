@@ -6195,6 +6195,49 @@ async def updateInternalVerification(body: dict = Body(...), user: dict = Depend
         {"$set": {f"stages.{stage}": stageChecks}}
     )
     
+    # ✅ CHECK IF STAGE IS COMPLETE AND UPDATE OVERALL STATUS
+    verification = await verificationsCol.find_one({"_id": verObjId})
+    current_stage = verification.get("currentStage")
+    stage_checks = verification.get("stages", {}).get(current_stage, [])
+    
+    # Check if all checks in current stage are COMPLETED
+    all_completed = all(
+        check.get("status") == "COMPLETED" 
+        for check in stage_checks
+    )
+    
+    if all_completed:
+        # Determine next stage or mark as complete
+        if current_stage == "primary":
+            next_stage = "secondary"
+        elif current_stage == "secondary":
+            next_stage = "final"
+        elif current_stage == "final":
+            # All stages complete - mark verification as COMPLETED
+            await verificationsCol.update_one(
+                {"_id": verObjId},
+                {"$set": {
+                    "overallStatus": "COMPLETED",
+                    "completedAt": datetime.now(timezone.utc).isoformat()
+                }}
+            )
+            
+            # Update candidate status
+            await candidatesCol.update_one(
+                {"_id": ObjectId(candidateId)},
+                {"$set": {"status": "VERIFIED"}}
+            )
+            next_stage = None
+        else:
+            next_stage = None
+        
+        # Move to next stage if applicable
+        if next_stage and next_stage in verification.get("stages", {}):
+            await verificationsCol.update_one(
+                {"_id": verObjId},
+                {"$set": {"currentStage": next_stage}}
+            )
+    
     # Log activity
     await logActivity(
         user,
@@ -6480,10 +6523,21 @@ async def ai_cv_validation(
                 
                 # Download from S3 using boto3 (with credentials)
                 try:
-                    # Extract S3 key from URL
-                    # URL format: https://maihoofiles.s3.ap-south-2.amazonaws.com/TVA/John_Doe/resume.pdf
-                    # Extract: TVA/John_Doe/resume.pdf
-                    s3_key = resumePath.split(f"{AWS_S3_BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/")[1]
+                    # Extract S3 key from URL - handle multiple formats
+                    # Format 1: https://bucket.s3.region.amazonaws.com/key
+                    # Format 2: https://s3.region.amazonaws.com/bucket/key
+                    
+                    if ".amazonaws.com/" in resumePath:
+                        # Split by .amazonaws.com/ and get the part after it
+                        parts = resumePath.split(".amazonaws.com/")
+                        if len(parts) > 1:
+                            s3_key = parts[1]
+                        else:
+                            raise Exception(f"Invalid S3 URL format: {resumePath}")
+                    else:
+                        raise Exception(f"Not a valid S3 URL: {resumePath}")
+                    
+                    print(f"🔍 Extracted S3 key: {s3_key}")
                     
                     ext = resumePath.split(".")[-1].lower()
                     if ext not in ["pdf", "docx"]:
@@ -6493,14 +6547,17 @@ async def ai_cv_validation(
                     
                     # Download from S3 using boto3
                     if s3_client:
+                        print(f"📥 Downloading from S3: bucket={AWS_S3_BUCKET_NAME}, key={s3_key}")
                         s3_client.download_file(AWS_S3_BUCKET_NAME, s3_key, temp_file_path)
                         resumePath = temp_file_path
                         print(f"✅ Downloaded from S3 using boto3: {temp_file_path}")
                     else:
-                        raise Exception("S3 client not initialized")
+                        raise Exception("S3 client not initialized. Check AWS credentials in environment variables.")
                         
                 except Exception as s3_error:
                     print(f"❌ S3 download error: {s3_error}")
+                    print(f"❌ Resume URL: {resumePath}")
+                    print(f"❌ Bucket: {AWS_S3_BUCKET_NAME}, Region: {AWS_REGION}")
                     raise HTTPException(status_code=400, detail=f"Failed to fetch resume from S3: {str(s3_error)}")
             else:
                 # Local file path
@@ -6925,6 +6982,49 @@ async def submit_ai_cv_validation(
             {"$set": {"stages": stages}}
         )
         
+        # ✅ CHECK IF STAGE IS COMPLETE AND UPDATE OVERALL STATUS
+        verification = await verificationsCol.find_one({"_id": verificationObjId})
+        current_stage = verification.get("currentStage")
+        stage_checks = verification.get("stages", {}).get(current_stage, [])
+        
+        # Check if all checks in current stage are COMPLETED
+        all_completed = all(
+            check.get("status") == "COMPLETED" 
+            for check in stage_checks
+        )
+        
+        if all_completed:
+            # Determine next stage or mark as complete
+            if current_stage == "primary":
+                next_stage = "secondary"
+            elif current_stage == "secondary":
+                next_stage = "final"
+            elif current_stage == "final":
+                # All stages complete - mark verification as COMPLETED
+                await verificationsCol.update_one(
+                    {"_id": verificationObjId},
+                    {"$set": {
+                        "overallStatus": "COMPLETED",
+                        "completedAt": datetime.now(timezone.utc).isoformat()
+                    }}
+                )
+                
+                # Update candidate status
+                await candidatesCol.update_one(
+                    {"_id": ObjectId(candidateId)},
+                    {"$set": {"status": "VERIFIED"}}
+                )
+                next_stage = None
+            else:
+                next_stage = None
+            
+            # Move to next stage if applicable
+            if next_stage and next_stage in verification.get("stages", {}):
+                await verificationsCol.update_one(
+                    {"_id": verificationObjId},
+                    {"$set": {"currentStage": next_stage}}
+                )
+        
         # Log activity
         await logActivity(
             user,
@@ -6954,3 +7054,444 @@ async def submit_ai_cv_validation(
             "Error"
         )
         raise HTTPException(status_code=500, detail=f"Failed to submit AI CV validation: {str(e)}")
+
+
+# ------------------------------------------------
+# 📌 AI EDUCATION VALIDATION ENDPOINT
+# ------------------------------------------------
+
+@app.post("/secure/ai_education_validation")
+async def ai_education_validation(
+    verificationId: str = Form(...),
+    educationDocument: UploadFile = File(...),  # Required - education certificate/marksheet
+    user: dict = Depends(requireAuth)
+):
+    """
+    AI Education Document Validation - Extract and validate education information using OCR + AI
+    
+    Parameters:
+    - verificationId: The verification record ID
+    - educationDocument: Education certificate/marksheet (PDF/JPG/PNG)
+    """
+    
+    temp_file_path = None
+    
+    try:
+        # Verify verification record exists and user has access
+        verificationObjId = ObjectId(verificationId)
+        verification = await verificationsCol.find_one({"_id": verificationObjId})
+        
+        if not verification:
+            raise HTTPException(status_code=404, detail="Verification record not found")
+        
+        # Get candidate details
+        candidateId = verification.get("candidateId")
+        candidate = await candidatesCol.find_one({"_id": ObjectId(candidateId)})
+        
+        if not candidate:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        
+        candidateOrgId = str(candidate.get("organizationId"))
+        
+        # Role-based access control (same as CV validation)
+        role = user.get("role")
+        userEmail = user.get("email", "").lower().strip()
+        userOrgId = str(user.get("organizationId"))
+        accessible = [str(x) for x in user.get("accessibleOrganizations", [])]
+        
+        allowed = False
+        
+        if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+            allowed = True
+        elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
+            allowed = True
+        elif role == "SUPER_ADMIN_HELPER":
+            if candidateOrgId in accessible:
+                allowed = True
+        elif role in ["ORG_HR", "SPOC"]:
+            if candidateOrgId == userOrgId:
+                allowed = True
+        elif role == "HELPER":
+            if candidateOrgId == userOrgId and candidate.get("createdBy", "").lower().strip() == userEmail:
+                allowed = True
+        
+        if not allowed:
+            raise HTTPException(status_code=403, detail="You are not authorized to perform AI education validation for this candidate")
+        
+        # Validate file type
+        ext = educationDocument.filename.split(".")[-1].lower()
+        if ext not in ["pdf", "jpg", "jpeg", "png"]:
+            raise HTTPException(status_code=400, detail="Only PDF, JPG, PNG files are supported for education documents")
+        
+        # Save file temporarily
+        print(f"📄 Education document received: {educationDocument.filename}")
+        temp_file_path = f"/tmp/education_doc_{candidateId}.{ext}"
+        with open(temp_file_path, "wb") as f:
+            f.write(await educationDocument.read())
+        print(f"✅ Saved to temp: {temp_file_path}")
+        
+        # Extract text using OCR
+        from utils.ai_utils import extract_text_with_ocr, validate_education_document
+        
+        print(f"🔍 Extracting text from education document using OCR...")
+        document_text = extract_text_with_ocr(temp_file_path)
+        
+        if not document_text or len(document_text.strip()) < 20:
+            raise HTTPException(status_code=400, detail="Could not extract meaningful text from document. Please ensure document is clear and readable.")
+        
+        print(f"✅ Extracted {len(document_text)} characters from document")
+        
+        # Validate using AI
+        print(f"🎓 Starting AI education validation for verification {verificationId}")
+        validation_result = await validate_education_document(document_text)
+        
+        if not validation_result:
+            raise HTTPException(status_code=500, detail="AI validation failed to return results")
+        
+        # Find the ai_education_validation check in verification stages
+        stages = verification.get("stages", {})
+        updated = False
+        
+        for stage_name, checks in stages.items():
+            for check in checks:
+                if check.get("checkName") == "ai_education_validation" or check.get("check") == "ai_education_validation":
+                    # Update the check with AI results but keep PENDING status
+                    check.update({
+                        "status": "PENDING",  # Keep PENDING for manual review
+                        "aiAnalysisCompleted": True,
+                        "aiAnalysisAt": datetime.now(timezone.utc),
+                        "aiAnalysisBy": user.get("email"),
+                        "aiAnalysis": {
+                            "degree_type": validation_result.get("degree_type", ""),
+                            "field_of_study": validation_result.get("field_of_study", ""),
+                            "institution_name": validation_result.get("institution_name", ""),
+                            "start_date": validation_result.get("start_date", ""),
+                            "end_date": validation_result.get("end_date", ""),
+                            "duration_years": validation_result.get("duration_years", 0),
+                            "grade": validation_result.get("grade", ""),
+                            "board_university": validation_result.get("board_university", ""),
+                            "document_type": validation_result.get("document_type", ""),
+                            "authenticity_score": validation_result.get("authenticity_score", 0),
+                            "verification_status": validation_result.get("verification_status", ""),
+                            "positive_findings": validation_result.get("positive_findings", []),
+                            "red_flags": validation_result.get("red_flags", []),
+                            "extracted_text_quality": validation_result.get("extracted_text_quality", ""),
+                            "recommendation": validation_result.get("recommendation", "REVIEW_REQUIRED"),
+                            "summary": validation_result.get("summary", ""),
+                            "validation_id": str(uuid.uuid4()),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "method": "OpenAI-GPT4o-mini-OCR"
+                        },
+                        "remarks": f"AI education validation completed. Score: {validation_result.get('authenticity_score', 0)}/100. Recommendation: {validation_result.get('recommendation', 'REVIEW_REQUIRED')}. Awaiting manual review."
+                    })
+                    updated = True
+                    break
+            if updated:
+                break
+        
+        if not updated:
+            raise HTTPException(status_code=400, detail="AI education validation check not found in verification stages")
+        
+        # Save updated verification
+        await verificationsCol.update_one(
+            {"_id": verificationObjId},
+            {"$set": {"stages": stages}}
+        )
+        
+        # Log activity
+        await logActivity(
+            user,
+            "AI Education Validation Completed",
+            f"AI education validation completed for {candidate.get('firstName', '')} {candidate.get('lastName', '')} (Score: {validation_result.get('authenticity_score', 0)}/100). Awaiting manual review.",
+            "Success"
+        )
+        
+        return JSONResponse(
+            status_code=200,
+            content=jsonable_encoder({
+                "message": "AI education validation completed successfully. Please review and submit.",
+                "verificationId": verificationId,
+                "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
+                "analysis": validation_result
+            })
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"❌ AI Education Validation Error: {str(e)}")
+        print(f"📋 Full traceback:\n{error_details}")
+        
+        await logActivity(
+            user,
+            "AI Education Validation Failed",
+            f"Failed to complete AI education validation: {str(e)}",
+            "Error"
+        )
+        raise HTTPException(status_code=500, detail=f"AI education validation failed: {str(e)}")
+    finally:
+        # Cleanup temporary file
+        try:
+            if 'temp_file_path' in locals() and temp_file_path:
+                import os
+                if os.path.exists(temp_file_path):
+                    os.remove(temp_file_path)
+                    print(f"🗑️ Cleaned up temporary file: {temp_file_path}")
+        except Exception as cleanup_error:
+            print(f"⚠️ Failed to cleanup temp file: {cleanup_error}")
+
+
+@app.get("/secure/ai_education_validation_results/{verificationId}")
+async def get_ai_education_validation_results(
+    verificationId: str,
+    user: dict = Depends(requireAuth)
+):
+    """
+    Get AI education validation results for a verification record
+    """
+    try:
+        verificationObjId = ObjectId(verificationId)
+        verification = await verificationsCol.find_one({"_id": verificationObjId})
+        
+        if not verification:
+            raise HTTPException(status_code=404, detail="Verification record not found")
+        
+        # Get candidate details for access control
+        candidateId = verification.get("candidateId")
+        candidate = await candidatesCol.find_one({"_id": ObjectId(candidateId)})
+        
+        if not candidate:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        
+        candidateOrgId = str(candidate.get("organizationId"))
+        
+        # Role-based access control
+        role = user.get("role")
+        userEmail = user.get("email", "").lower().strip()
+        userOrgId = str(user.get("organizationId"))
+        accessible = [str(x) for x in user.get("accessibleOrganizations", [])]
+        
+        allowed = False
+        
+        if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+            allowed = True
+        elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
+            allowed = True
+        elif role == "SUPER_ADMIN_HELPER":
+            if candidateOrgId in accessible:
+                allowed = True
+        elif role in ["ORG_HR", "SPOC"]:
+            if candidateOrgId == userOrgId:
+                allowed = True
+        elif role == "HELPER":
+            if candidateOrgId == userOrgId and candidate.get("createdBy", "").lower().strip() == userEmail:
+                allowed = True
+        
+        if not allowed:
+            raise HTTPException(status_code=403, detail="You are not authorized to view this verification")
+        
+        # Find ai_education_validation check
+        stages = verification.get("stages", {})
+        education_check = None
+        
+        for stage_name, checks in stages.items():
+            for check in checks:
+                if check.get("checkName") == "ai_education_validation" or check.get("check") == "ai_education_validation":
+                    education_check = check
+                    break
+            if education_check:
+                break
+        
+        if not education_check:
+            raise HTTPException(status_code=404, detail="AI education validation check not found in verification")
+        
+        if not education_check.get("aiAnalysisCompleted"):
+            raise HTTPException(status_code=400, detail="AI education validation has not been completed yet")
+        
+        return JSONResponse(
+            status_code=200,
+            content=jsonable_encoder({
+                "verificationId": verificationId,
+                "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
+                "candidateEmail": candidate.get("email", ""),
+                "aiAnalysis": education_check.get("aiAnalysis", {}),
+                "status": education_check.get("status", "PENDING"),
+                "remarks": education_check.get("remarks", "")
+            })
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve education validation results: {str(e)}")
+
+
+@app.post("/secure/submit_ai_education_validation")
+async def submit_ai_education_validation(
+    verificationId: str = Form(...),
+    final_status: str = Form(...),  # "COMPLETED" or "FAILED"
+    staff_remarks: str = Form(""),
+    user: dict = Depends(requireAuth)
+):
+    """
+    Submit final decision for AI education validation after reviewing AI analysis
+    
+    Parameters:
+    - verificationId: The verification record ID
+    - final_status: "COMPLETED" or "FAILED" 
+    - staff_remarks: Additional remarks from staff review
+    """
+    
+    if final_status not in ["COMPLETED", "FAILED"]:
+        raise HTTPException(status_code=400, detail="final_status must be 'COMPLETED' or 'FAILED'")
+    
+    try:
+        verificationObjId = ObjectId(verificationId)
+        verification = await verificationsCol.find_one({"_id": verificationObjId})
+        
+        if not verification:
+            raise HTTPException(status_code=404, detail="Verification record not found")
+        
+        # Get candidate details
+        candidateId = verification.get("candidateId")
+        candidate = await candidatesCol.find_one({"_id": ObjectId(candidateId)})
+        
+        if not candidate:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        
+        candidateOrgId = str(candidate.get("organizationId"))
+        
+        # Role-based access control
+        role = user.get("role")
+        userEmail = user.get("email", "").lower().strip()
+        userOrgId = str(user.get("organizationId"))
+        accessible = [str(x) for x in user.get("accessibleOrganizations", [])]
+        
+        allowed = False
+        
+        if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+            allowed = True
+        elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
+            allowed = True
+        elif role == "SUPER_ADMIN_HELPER":
+            if candidateOrgId in accessible:
+                allowed = True
+        elif role in ["ORG_HR", "SPOC"]:
+            if candidateOrgId == userOrgId:
+                allowed = True
+        elif role == "HELPER":
+            if candidateOrgId == userOrgId and candidate.get("createdBy", "").lower().strip() == userEmail:
+                allowed = True
+        
+        if not allowed:
+            raise HTTPException(status_code=403, detail="You are not authorized to submit this validation")
+        
+        # Find ai_education_validation check
+        stages = verification.get("stages", {})
+        updated = False
+        
+        for stage_name, checks in stages.items():
+            for check in checks:
+                if check.get("checkName") == "ai_education_validation" or check.get("check") == "ai_education_validation":
+                    # Check if AI analysis was completed
+                    if not check.get("aiAnalysisCompleted"):
+                        raise HTTPException(status_code=400, detail="AI analysis must be completed before submission")
+                    
+                    # Update status
+                    check["status"] = final_status
+                    check["submittedAt"] = datetime.now(timezone.utc)
+                    check["submittedBy"] = user.get("email")
+                    
+                    # Append staff remarks to existing remarks
+                    if staff_remarks:
+                        existing_remarks = check.get("remarks", "")
+                        check["remarks"] = f"{existing_remarks}\n\nStaff Review: {staff_remarks}"
+                    
+                    updated = True
+                    break
+            if updated:
+                break
+        
+        if not updated:
+            raise HTTPException(status_code=404, detail="AI education validation check not found")
+        
+        # Save updated verification
+        await verificationsCol.update_one(
+            {"_id": verificationObjId},
+            {"$set": {"stages": stages}}
+        )
+        
+        # ✅ CHECK IF STAGE IS COMPLETE AND UPDATE OVERALL STATUS
+        verification = await verificationsCol.find_one({"_id": verificationObjId})
+        current_stage = verification.get("currentStage")
+        stage_checks = verification.get("stages", {}).get(current_stage, [])
+        
+        # Check if all checks in current stage are COMPLETED
+        all_completed = all(
+            check.get("status") == "COMPLETED" 
+            for check in stage_checks
+        )
+        
+        if all_completed:
+            # Determine next stage or mark as complete
+            if current_stage == "primary":
+                next_stage = "secondary"
+            elif current_stage == "secondary":
+                next_stage = "final"
+            elif current_stage == "final":
+                # All stages complete - mark verification as COMPLETED
+                await verificationsCol.update_one(
+                    {"_id": verificationObjId},
+                    {"$set": {
+                        "overallStatus": "COMPLETED",
+                        "completedAt": datetime.now(timezone.utc).isoformat()
+                    }}
+                )
+                
+                # Update candidate status
+                await candidatesCol.update_one(
+                    {"_id": ObjectId(candidateId)},
+                    {"$set": {"status": "VERIFIED"}}
+                )
+                next_stage = None
+            else:
+                next_stage = None
+            
+            # Move to next stage if applicable
+            if next_stage and next_stage in verification.get("stages", {}):
+                await verificationsCol.update_one(
+                    {"_id": verificationObjId},
+                    {"$set": {"currentStage": next_stage}}
+                )
+        
+        # Log activity
+        await logActivity(
+            user,
+            "AI Education Validation Submitted",
+            f"AI education validation submitted as {final_status} for {candidate.get('firstName', '')} {candidate.get('lastName', '')}",
+            "Success"
+        )
+        
+        return JSONResponse(
+            status_code=200,
+            content=jsonable_encoder({
+                "message": f"AI education validation submitted as {final_status} successfully",
+                "verificationId": verificationId,
+                "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
+                "finalStatus": final_status,
+                "staffRemarks": staff_remarks
+            })
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        await logActivity(
+            user,
+            "AI Education Validation Submission Failed",
+            f"Failed to submit AI education validation: {str(e)}",
+            "Error"
+        )
+        raise HTTPException(status_code=500, detail=f"Failed to submit AI education validation: {str(e)}")

@@ -263,3 +263,231 @@ Provide detailed positive and negative findings with an authenticity score.
     except Exception as e:
         print(f"❌ CV authenticity validation error: {e}")
         raise Exception(f"Failed to validate CV authenticity: {str(e)}")
+
+# ----
+# --------------------------------------------
+# OCR TEXT EXTRACTION (for education documents)
+# ------------------------------------------------
+
+def extract_text_with_ocr(file_path: str) -> str:
+    """
+    Extract text from image or PDF using OCR (Tesseract)
+    Works with: JPG, PNG, PDF
+    
+    Args:
+        file_path: Path to image or PDF file
+    
+    Returns:
+        Extracted text
+    """
+    try:
+        import pytesseract
+        from PIL import Image
+        
+        ext = file_path.split(".")[-1].lower()
+        
+        if ext == "pdf":
+            # Try PDF text extraction first (faster, no OCR needed)
+            try:
+                print(f"📄 Attempting direct PDF text extraction...")
+                with open(file_path, 'rb') as f:
+                    text = extract_text_from_pdf(f)
+                    if text and len(text.strip()) > 50:  # If we got meaningful text
+                        print(f"✅ Extracted text directly from PDF (no OCR needed)")
+                        return text
+            except Exception as pdf_err:
+                print(f"⚠️ Direct PDF extraction failed: {pdf_err}")
+            
+            # Fallback to OCR if direct extraction failed or returned little text
+            try:
+                from pdf2image import convert_from_path
+                print(f"📄 Converting PDF to images for OCR...")
+                images = convert_from_path(file_path)
+                text = ""
+                for i, image in enumerate(images):
+                    print(f"🔍 OCR processing page {i+1}/{len(images)}")
+                    page_text = pytesseract.image_to_string(image)
+                    text += page_text + "\n\n"
+                return text.strip()
+            except ImportError:
+                raise Exception("pdf2image not installed. Install with: pip install pdf2image")
+            except Exception as ocr_err:
+                if "poppler" in str(ocr_err).lower():
+                    raise Exception(
+                        "Poppler not installed. Install with: brew install poppler (macOS) or apt-get install poppler-utils (Linux). "
+                        "Alternatively, upload a text-based PDF or image file instead."
+                    )
+                raise Exception(f"PDF OCR failed: {str(ocr_err)}")
+        
+        elif ext in ["jpg", "jpeg", "png", "tiff", "bmp"]:
+            # Direct OCR on image
+            print(f"🔍 OCR processing image...")
+            image = Image.open(file_path)
+            text = pytesseract.image_to_string(image)
+            return text.strip()
+        
+        else:
+            raise Exception(f"Unsupported file type for OCR: {ext}. Supported: PDF, JPG, PNG, TIFF, BMP")
+            
+    except Exception as e:
+        print(f"❌ OCR extraction error: {e}")
+        raise Exception(f"Failed to extract text with OCR: {str(e)}")
+
+
+# ------------------------------------------------
+# AI EDUCATION VALIDATION
+# ------------------------------------------------
+
+async def validate_education_document(document_text: str) -> Dict:
+    """
+    Validate education document using OpenAI GPT-4o-mini
+    Extracts structured education information
+    
+    Args:
+        document_text: Extracted text from education certificate/marksheet
+    
+    Returns:
+        Structured education data with validation
+    """
+    if not openai_client:
+        raise Exception("OpenAI client not configured")
+    
+    try:
+        print(f"🎓 Starting AI education document validation...")
+        
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """You are an expert education document validator.
+Extract structured information from education certificates, marksheets, and degree documents.
+
+Validate:
+1. Degree/qualification type
+2. Field of study/specialization
+3. Institution name
+4. Duration (start and end dates)
+5. Grades/marks/CGPA
+6. Authenticity indicators
+7. Red flags (tampering, inconsistencies)"""
+                },
+                {
+                    "role": "user",
+                    "content": f"""Analyze this education document and extract structured information:
+
+DOCUMENT TEXT:
+{document_text}
+
+Extract all education details and validate authenticity."""
+                }
+            ],
+            functions=[{
+                "name": "validate_education",
+                "description": "Extract and validate education document information",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "degree_type": {
+                            "type": "string",
+                            "description": "Type of degree (e.g., Bachelor of Technology, Master of Science, High School)"
+                        },
+                        "field_of_study": {
+                            "type": "string",
+                            "description": "Major/specialization (e.g., Computer Science, Mechanical Engineering)"
+                        },
+                        "institution_name": {
+                            "type": "string",
+                            "description": "Name of university/college/school"
+                        },
+                        "start_date": {
+                            "type": "string",
+                            "description": "Start year or date (e.g., 2014, Aug 2014)"
+                        },
+                        "end_date": {
+                            "type": "string",
+                            "description": "End year or date (e.g., 2018, May 2018)"
+                        },
+                        "duration_years": {
+                            "type": "number",
+                            "description": "Duration in years"
+                        },
+                        "grade": {
+                            "type": "string",
+                            "description": "Grade/marks/CGPA (e.g., First Class, 8.5 CGPA, 85%)"
+                        },
+                        "board_university": {
+                            "type": "string",
+                            "description": "Affiliated board/university"
+                        },
+                        "document_type": {
+                            "type": "string",
+                            "enum": ["DEGREE_CERTIFICATE", "MARKSHEET", "PROVISIONAL_CERTIFICATE", "TRANSCRIPT", "OTHER"],
+                            "description": "Type of document"
+                        },
+                        "authenticity_score": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "Authenticity score (0-100)"
+                        },
+                        "verification_status": {
+                            "type": "string",
+                            "enum": ["VERIFIED", "SUSPICIOUS", "INCOMPLETE", "UNCLEAR"],
+                            "description": "Overall verification status"
+                        },
+                        "positive_findings": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Valid/authentic elements found"
+                        },
+                        "red_flags": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "severity": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                                    "issue": {"type": "string"},
+                                    "description": {"type": "string"}
+                                }
+                            },
+                            "description": "Issues or suspicious elements"
+                        },
+                        "extracted_text_quality": {
+                            "type": "string",
+                            "enum": ["EXCELLENT", "GOOD", "FAIR", "POOR"],
+                            "description": "Quality of OCR text extraction"
+                        },
+                        "recommendation": {
+                            "type": "string",
+                            "enum": ["APPROVE", "REVIEW_REQUIRED", "REJECT"],
+                            "description": "Final recommendation"
+                        },
+                        "summary": {
+                            "type": "string",
+                            "description": "Brief summary of findings"
+                        }
+                    },
+                    "required": ["degree_type", "institution_name", "authenticity_score", "verification_status", "recommendation"]
+                }
+            }],
+            function_call={"name": "validate_education"},
+            temperature=0.1
+        )
+        
+        function_call = response.choices[0].message.function_call
+        if function_call:
+            result = json.loads(function_call.arguments)
+            
+            print(f"✅ Education validation completed")
+            print(f"📊 Score: {result.get('authenticity_score', 0)}/100")
+            print(f"🎓 Degree: {result.get('degree_type', 'N/A')}")
+            print(f"🏫 Institution: {result.get('institution_name', 'N/A')}")
+            
+            return result
+        else:
+            raise Exception("No education validation generated")
+            
+    except Exception as e:
+        print(f"❌ Education validation error: {e}")
+        raise Exception(f"Failed to validate education document: {str(e)}")
