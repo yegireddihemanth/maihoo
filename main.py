@@ -7057,6 +7057,375 @@ async def submit_ai_cv_validation(
 
 
 # ------------------------------------------------
+# 📌 INVOICE GENERATION - SIMPLE VERSION
+# ------------------------------------------------
+
+@app.post("/secure/generate_invoice")
+async def generate_invoice(
+    verificationId: str = Form(...),
+    user: dict = Depends(requireAuth)
+):
+    """
+    Generate invoice for completed checks
+    Fetches prices from organization's pricing configuration
+    """
+    
+    try:
+        # Get verification
+        verification = await verificationsCol.find_one({"_id": ObjectId(verificationId)})
+        if not verification:
+            raise HTTPException(status_code=404, detail="Verification not found")
+        
+        # Get organization with pricing
+        organizationId = verification.get("organizationId")
+        organizationsCol = db["organizations"]
+        organization = await organizationsCol.find_one({"_id": ObjectId(organizationId)})
+        
+        if not organization:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        
+        # Get candidate
+        candidateId = verification.get("candidateId")
+        candidate = await candidatesCol.find_one({"_id": ObjectId(candidateId)})
+        
+        # Role-based access control
+        role = user.get("role")
+        userEmail = user.get("email", "").lower().strip()
+        userOrgId = str(user.get("organizationId"))
+        accessible = [str(x) for x in user.get("accessibleOrganizations", [])]
+        
+        allowed = False
+        
+        # 1. SUPER_ADMIN or SUPER_SPOC - can access all organizations
+        if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
+            allowed = True
+        
+        # 2. SPOC from main BGV org - can access all organizations
+        elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
+            allowed = True
+        
+        # 3. SUPER_ADMIN_HELPER - can access accessible organizations only
+        elif role == "SUPER_ADMIN_HELPER":
+            if str(organizationId) in accessible:
+                allowed = True
+        
+        # 4. ORG_HR or ORG_SPOC - can access their own organization only
+        elif role in ["ORG_HR", "SPOC"]:
+            if str(organizationId) == userOrgId:
+                allowed = True
+        
+        # 5. HELPER - can access candidates they created or verifications they initiated
+        elif role == "HELPER":
+            # Check if helper belongs to the same organization
+            if str(organizationId) == userOrgId:
+                # Check if helper created the candidate
+                candidate_created_by = candidate.get("createdBy", "").lower().strip() if candidate else ""
+                # Check if helper initiated the verification
+                verification_initiated_by = verification.get("initiatedBy", "").lower().strip()
+                
+                if candidate_created_by == userEmail or verification_initiated_by == userEmail:
+                    allowed = True
+        
+        if not allowed:
+            raise HTTPException(
+                status_code=403, 
+                detail="You are not authorized to generate invoice for this verification"
+            )
+        
+        # Get pricing from org services array
+        services = organization.get("services", [])
+        if not services:
+            raise HTTPException(status_code=400, detail="Organization services/pricing not configured")
+        
+        # Build pricing map from services array
+        pricing_map = {}
+        for service in services:
+            service_name = service.get("serviceName")
+            service_price = service.get("price")
+            if service_name and service_price:
+                pricing_map[service_name] = float(service_price)
+        
+        # Collect completed checks and calculate total
+        invoice_items = []
+        total_amount = 0.0
+        missing_prices = []
+        
+        stages = verification.get("stages", {})
+        for stage_name, checks in stages.items():
+            for check in checks:
+                # Try both 'check' and 'checkName' fields
+                check_name = check.get("check") or check.get("checkName")
+                check_status = check.get("status")
+                
+                if not check_name:
+                    continue  # Skip if no check name found
+                
+                # Only bill COMPLETED checks
+                if check_status == "COMPLETED":
+                    # Get price from pricing map
+                    price = pricing_map.get(check_name)
+                    
+                    if price is None:
+                        missing_prices.append(check_name)
+                        continue  # Skip checks without configured price
+                    
+                    invoice_items.append({
+                        "checkName": check_name,
+                        "stage": stage_name,
+                        "price": price,
+                        "completedAt": check.get("submittedAt")
+                    })
+                    
+                    total_amount += price
+        
+        # Warn if some checks don't have prices
+        if missing_prices:
+            print(f"⚠️ Warning: Prices not configured for checks: {missing_prices}")
+        
+        # Calculate tax (18% GST)
+        tax = total_amount * 0.18
+        grand_total = total_amount + tax
+        
+        # Build invoice
+        invoice = {
+            "invoiceNumber": f"INV-{datetime.now().strftime('%Y%m%d')}-{str(ObjectId(verificationId))[-6:]}",
+            "invoiceDate": datetime.now(timezone.utc).isoformat(),
+            "verificationId": verificationId,
+            
+            # Organization details
+            "organization": {
+                "organizationId": str(organizationId),
+                "organizationName": organization.get("organizationName", "N/A"),
+                "email": organization.get("email", "N/A"),
+                "phone": organization.get("phone", "N/A"),
+                "gstNumber": organization.get("gstNumber", "N/A")
+            },
+            
+            # Candidate details
+            "candidate": {
+                "candidateId": str(candidateId),
+                "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip() if candidate else "N/A",
+                "email": candidate.get("email", "N/A") if candidate else "N/A",
+                "phone": candidate.get("phone", "N/A") if candidate else "N/A"
+            },
+            
+            # Invoice items (completed checks)
+            "items": invoice_items,
+            "totalItems": len(invoice_items),
+            
+            # Pricing
+            "subtotal": round(total_amount, 2),
+            "taxRate": 0.18,
+            "tax": round(tax, 2),
+            "grandTotal": round(grand_total, 2),
+            "currency": "INR",
+            
+            # Warnings
+            "warnings": missing_prices if missing_prices else None
+        }
+        
+        # Save to database
+        invoicesCol = db["invoices"]
+        result = await invoicesCol.insert_one({
+            **invoice,
+            "createdAt": datetime.now(timezone.utc),
+            "createdBy": user.get("email")
+        })
+        
+        invoice["invoiceId"] = str(result.inserted_id)
+        
+        await logActivity(
+            user,
+            "Invoice Generated",
+            f"Generated invoice for verification {verificationId} - Total: ₹{grand_total:.2f}",
+            "Success"
+        )
+        
+        return JSONResponse(status_code=200, content=jsonable_encoder(invoice))
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate invoice: {str(e)}")
+
+
+# ------------------------------------------------
+# 📌 FORGOT PASSWORD SYSTEM
+# ------------------------------------------------
+
+@app.post("/public/forgot-password")
+async def forgot_password(
+    email: str = Form(...)
+):
+    """
+    Request password reset link
+    Sends email with reset token
+    """
+    try:
+        # Find user by email
+        usersCol = db["users"]
+        user = await usersCol.find_one({"email": email.lower().strip()})
+        
+        if not user:
+            # Don't reveal if email exists or not (security)
+            return JSONResponse(
+                status_code=200,
+                content={"message": "If the email exists, a password reset link has been sent"}
+            )
+        
+        # Generate reset token (valid for 1 hour)
+        reset_token = str(uuid.uuid4())
+        reset_expiry = datetime.now(timezone.utc) + timedelta(hours=1)
+        
+        # Save reset token to user
+        await usersCol.update_one(
+            {"_id": user["_id"]},
+            {
+                "$set": {
+                    "resetToken": reset_token,
+                    "resetTokenExpiry": reset_expiry
+                }
+            }
+        )
+        
+        # Build reset link
+        reset_link = f"https://bgv-ey1e.onrender.com/reset-password?token={reset_token}"
+        
+        # Send email with reset link using Gmail API
+        try:
+            from utils.email_utils import _load_gmail_service
+            from email.mime.text import MIMEText
+            import base64
+            
+            email_body = f"""
+Hi {user.get('userName', 'User')},
+
+You requested to reset your password. Click the link below to reset:
+
+{reset_link}
+
+This link will expire in 1 hour.
+
+If you didn't request this, please ignore this email.
+
+Best regards,
+BGV Team
+"""
+            
+            # Create email MIME object
+            message = MIMEText(email_body)
+            message["to"] = email
+            message["from"] = "me"
+            message["subject"] = "Password Reset Request"
+            
+            # Gmail API requires base64url encoding
+            raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+            
+            # Send via Gmail API
+            service = _load_gmail_service()
+            service.users().messages().send(userId="me", body={"raw": raw}).execute()
+            
+            print(f"✅ Password reset email sent to {email}")
+            
+        except Exception as e:
+            print(f"❌ Failed to send reset email: {e}")
+            # Continue anyway - don't reveal email sending failure
+        
+        return JSONResponse(
+            status_code=200,
+            content={"message": "If the email exists, a password reset link has been sent"}
+        )
+        
+    except Exception as e:
+        print(f"❌ Forgot password error: {e}")
+        return JSONResponse(
+            status_code=200,
+            content={"message": "If the email exists, a password reset link has been sent"}
+        )
+
+
+@app.post("/public/reset-password")
+async def reset_password(
+    token: str = Form(...),
+    email: str = Form(...),
+    organizationId: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...)
+):
+    """
+    Reset password with token validation
+    Requires: token, email, organizationId, new password, confirm password
+    """
+    try:
+        # Validate passwords match
+        if new_password != confirm_password:
+            raise HTTPException(status_code=400, detail="Passwords do not match")
+        
+        # Validate password strength (minimum 6 characters)
+        if len(new_password) < 6:
+            raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+        
+        # Find user by reset token
+        usersCol = db["users"]
+        user = await usersCol.find_one({
+            "resetToken": token,
+            "resetTokenExpiry": {"$gt": datetime.now(timezone.utc)}
+        })
+        
+        if not user:
+            raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+        
+        # Verify email matches
+        user_email = user.get("email", "") or ""
+        if user_email.lower().strip() != email.lower().strip():
+            raise HTTPException(status_code=400, detail="Email does not match")
+        
+        # Verify organizationId matches
+        user_org_id = str(user.get("organizationId", ""))
+        provided_org_id = organizationId.strip()
+        
+        if user_org_id != provided_org_id:
+            raise HTTPException(status_code=400, detail="Organization ID does not match")
+        
+        # Update password and clear reset token
+        await usersCol.update_one(
+            {"_id": user["_id"]},
+            {
+                "$set": {
+                    "password": new_password,  # In production, hash this password!
+                    "updatedAt": datetime.now(timezone.utc)
+                },
+                "$unset": {
+                    "resetToken": "",
+                    "resetTokenExpiry": ""
+                }
+            }
+        )
+        
+        # Log activity
+        await logActivity(
+            {"email": email, "role": user.get("role")},
+            "Password Reset",
+            f"Password reset successful for {email}",
+            "Success"
+        )
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "message": "Password reset successful. You can now login with your new password.",
+                "email": email
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Reset password error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to reset password: {str(e)}")
+
+
+# ------------------------------------------------
 # 📌 AI EDUCATION VALIDATION ENDPOINT
 # ------------------------------------------------
 
