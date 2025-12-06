@@ -6923,6 +6923,7 @@ async def submit_ai_cv_validation(
         
         allowed = False
         
+        
         if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
             allowed = True
         elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
