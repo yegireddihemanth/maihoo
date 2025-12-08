@@ -1,27 +1,51 @@
 
 import base64
+import smtplib
+import os
 from email.mime.text import MIMEText
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-
+from email.mime.multipart import MIMEMultipart
 
 FRONTEND_SELF_VERIFY_URL = "https://bgv-zfdw.onrender.com/candidate/self-verification"
 
-# SCOPES used for Gmail API
-SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
+# Email configuration
+GMAIL_USER = os.getenv("GMAIL_USER", "")
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 
-def _load_gmail_service():
+def send_email_smtp(to_email, subject, body):
     """
-    Loads Gmail API credentials from token.json
+    Send email using Gmail SMTP with App Password (RECOMMENDED for production)
+    
+    Setup:
+    1. Go to Google Account → Security
+    2. Enable 2-Step Verification
+    3. Generate App Password
+    4. Add to .env: GMAIL_USER and GMAIL_APP_PASSWORD
     """
-    creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-    service = build("gmail", "v1", credentials=creds)
-    return service
+    if not GMAIL_USER or not GMAIL_APP_PASSWORD:
+        raise Exception("Gmail credentials not configured. Set GMAIL_USER and GMAIL_APP_PASSWORD in environment variables.")
+    
+    msg = MIMEMultipart()
+    msg['From'] = GMAIL_USER
+    msg['To'] = to_email
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'plain'))
+    
+    try:
+        # Use SMTP_SSL for port 465 (more reliable)
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+            server.send_message(msg)
+        print(f"✅ Email sent successfully to {to_email}")
+        return True
+    except Exception as e:
+        print(f"❌ SMTP Error: {e}")
+        raise Exception(f"Failed to send email: {str(e)}")
 
 
 def send_self_verification_email(to_email, candidateName, organizationName,
                                  stage, token, expiresAt):
-
+    """Send self-verification email using SMTP"""
+    
     # Build verification link
     link = f"{FRONTEND_SELF_VERIFY_URL}?token={token}"
 
@@ -41,26 +65,16 @@ Thanks,
 {organizationName} Verification Team
 """
 
-    # Create email MIME object
-    message = MIMEText(body)
-    message["to"] = to_email
-    message["from"] = "me"
-    message["subject"] = f"{stage.capitalize()} Stage Verification - {organizationName}"
-
-    # Gmail API requires base64url encoding
-    raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
-
     try:
-        service = _load_gmail_service()
-        service.users().messages().send(
-            userId="me",
-            body={"raw": raw_message}
-        ).execute()
-
+        send_email_smtp(
+            to_email=to_email,
+            subject=f"{stage.capitalize()} Stage Verification - {organizationName}",
+            body=body
+        )
         print("Email sent successfully to:", to_email)
     except Exception as e:
         print("Error sending email:", str(e))
-        raise Exception(f"GMAIL API ERROR: {str(e)}")
+        raise Exception(f"Email sending failed: {str(e)}")
 
 
 def send_password_reset_email(toEmail, userName, userId, newPassword):
@@ -88,24 +102,16 @@ Thanks,
 Maihoo Verification Team
 """
 
-    message = MIMEText(body)
-    message["to"] = toEmail
-    message["from"] = "me"
-    message["subject"] = "Password Reset Confirmation - Maihoo"
-
-    rawMessage = base64.urlsafe_b64encode(message.as_bytes()).decode()
-
     try:
-        service = _load_gmail_service()
-        service.users().messages().send(
-            userId="me",
-            body={"raw": rawMessage}
-        ).execute()
-
+        send_email_smtp(
+            to_email=toEmail,
+            subject="Password Reset Confirmation - Maihoo",
+            body=body
+        )
         print("Password reset email sent to:", toEmail)
     except Exception as e:
         print("Error sending password reset email:", str(e))
-        raise Exception(f"GMAIL API ERROR: {str(e)}")
+        raise Exception(f"Email sending failed: {str(e)}")
 
 def send_organization_welcome_email(
     toEmail,
@@ -181,45 +187,39 @@ Thanks,
 BGVApp Team
 """
 
-    message = MIMEText(body)
-    message["to"] = toEmail
-    message["from"] = "me"
-    message["subject"] = f"Welcome to BGVApp - {organizationName} Registration Successful"
-
-    rawMessage = base64.urlsafe_b64encode(message.as_bytes()).decode()
-
     try:
-        service = _load_gmail_service()
-        service.users().messages().send(
-            userId="me",
-            body={"raw": rawMessage}
-        ).execute()
-
-        print("Organization registration email sent to:", toEmail)
+        send_email_smtp(
+            to_email=toEmail,
+            subject=f"Welcome to BGVApp - {organizationName} Registration Successful",
+            body=body
+        )
+        print(f"✅ Welcome email sent to {toEmail}")
     except Exception as e:
         print("Error sending organization welcome email:", str(e))
-        raise Exception(f"GMAIL API ERROR: {str(e)}")
+        raise Exception(f"Email sending failed: {str(e)}")
     
 
 def send_ticket_email(toEmail, subject, body):
+    """
+    Sends ticket-related emails using SMTP
+    """
     try:
-        service = _load_gmail_service()
-        message = MIMEText(body)
-        message["to"] = toEmail
-        message["from"] = "me"
-        message["subject"] = subject
-
-        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-        service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        send_email_smtp(
+            to_email=toEmail,
+            subject=subject,
+            body=body
+        )
+        print(f"✅ Ticket email sent to {toEmail}")
     except Exception as e:
         print("Email sending failed:", str(e))
+        raise Exception(f"Email sending failed: {str(e)}")
 
 
 def send_verification_consent_email(to_email, candidate_name, organization_name, 
                                   verification_checks, consent_token, expires_at, 
                                   consent_url=None):
     """
-    Sends consent email to candidate before starting backend verification.
+    Sends consent email to candidate before starting backend verification using SMTP.
     
     Args:
         to_email: Candidate's email
@@ -283,22 +283,13 @@ Best regards,
 BGVApp Verification Team
 """
 
-    # Create and send email
-    message = MIMEText(body)
-    message["to"] = to_email
-    message["from"] = "me"
-    message["subject"] = f"Verification Consent Required - {organization_name}"
-
-    raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
-
     try:
-        service = _load_gmail_service()
-        service.users().messages().send(
-            userId="me",
-            body={"raw": raw_message}
-        ).execute()
-
-        print(f"Verification consent email sent successfully to: {to_email}")
+        send_email_smtp(
+            to_email=to_email,
+            subject=f"Verification Consent Required - {organization_name}",
+            body=body
+        )
+        print(f"✅ Verification consent email sent to {to_email}")
     except Exception as e:
         print(f"Error sending verification consent email: {str(e)}")
-        raise Exception(f"GMAIL API ERROR: {str(e)}")
+        raise Exception(f"Email sending failed: {str(e)}")

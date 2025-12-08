@@ -153,6 +153,27 @@ app.add_middleware(
     expose_headers=["set-cookie", "Set-Cookie"]  # Added Set-Cookie for Safari
 )
 
+# Subdomain Extraction Middleware
+@app.middleware("http")
+async def extract_subdomain(request: Request, call_next):
+    """
+    Extracts subdomain from request and adds it to request.state
+    Example: tcs.maihootech.in -> subdomain = "tcs"
+    """
+    host = request.headers.get("host", "")
+    parts = host.split(".")
+    
+    # Extract subdomain (e.g., tcs.maihootech.in -> tcs)
+    if len(parts) >= 3 and parts[-2] == "maihootech" and parts[-1] == "in":
+        request.state.subdomain = parts[0]
+        request.state.organization_domain = parts[0]
+    else:
+        request.state.subdomain = None
+        request.state.organization_domain = None
+    
+    response = await call_next(request)
+    return response
+
 # Safari/iOS Cookie Fix Middleware
 @app.middleware("http")
 async def safari_cookie_fix(request: Request, call_next):
@@ -299,6 +320,14 @@ async def requireAuth(request: Request):
         raise HTTPException(status_code=401, detail="user not found")
     return user
 
+
+def get_subdomain(request: Request) -> Optional[str]:
+    """
+    Helper function to get subdomain from request
+    Returns: subdomain string or None
+    """
+    return getattr(request.state, "subdomain", None)
+
 from fastapi.openapi.docs import get_swagger_ui_html
 
 
@@ -371,12 +400,14 @@ async def login(body: loginRequest, response: Response):
     # --- Fetch organization details ---
     orgName = None
     orgServices = []
+    orgSubdomain = None
     if orgId:
         try:
             org = await orgsCol.find_one({"_id": ObjectId(orgId)})
             if org:
                 orgName = org.get("organizationName")
                 orgServices = org.get("services", [])
+                orgSubdomain = org.get("subdomain")  # e.g., "tcs"
         except Exception as e:
             print(f"⚠️ Error fetching org details for {orgId}: {e}")
 
@@ -390,6 +421,7 @@ async def login(body: loginRequest, response: Response):
         "role": user.get("role"),
         "organizationId": orgId,
         "organizationName": orgName,
+        "organizationSubdomain": orgSubdomain,  # ✅ Frontend uses this to redirect
         "phoneNumber": user.get("phoneNumber"),
         "isSuperAdmin": isSuperAdmin,
         "session": "created",
@@ -1600,6 +1632,30 @@ async def getVerifications(
                 initiated_by_name = initiated_by_email
         
         v["initiatedByName"] = initiated_by_name
+        
+        # ✅ Fetch candidate name
+        candidate_name = None
+        try:
+            candidate = await candidatesCol.find_one({"_id": ObjectId(v["candidateId"])})
+            if candidate:
+                candidate_name = f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip()
+                if not candidate_name:
+                    candidate_name = candidate.get("email", "Unknown")
+        except Exception as e:
+            print(f"Error fetching candidate {v['candidateId']}: {e}")
+        
+        v["candidateName"] = candidate_name
+        
+        # ✅ Fetch organization name
+        org_name = None
+        try:
+            org = await orgsCol.find_one({"_id": ObjectId(v["organizationId"])})
+            if org:
+                org_name = org.get("organizationName", "Unknown")
+        except Exception as e:
+            print(f"Error fetching organization {v['organizationId']}: {e}")
+        
+        v["organizationName"] = org_name
 
         totalChecks = completedChecks = failedChecks = inProgressChecks = 0
 
@@ -1626,6 +1682,21 @@ async def getVerifications(
                     failedChecks += 1
                 elif status == "IN_PROGRESS":
                     inProgressChecks += 1
+        
+        # ✅ Include AI CV Validation (independent check)
+        ai_cv = v.get("aiCvValidation")
+        if ai_cv:
+            totalChecks += 1
+            ai_status = ai_cv.get("status", "NOT_STARTED")
+            if ai_status == "COMPLETED":
+                completedChecks += 1
+            elif ai_status == "FAILED":
+                failedChecks += 1
+            elif ai_status == "IN_PROGRESS":
+                inProgressChecks += 1
+            
+            # Add to response for frontend display
+            v["aiCvValidation"] = ai_cv
 
         completionPercentage = (
             math.floor((completedChecks / totalChecks) * 100)
@@ -6455,18 +6526,17 @@ async def uploadEducationCertificate(
 
 @app.post("/secure/ai_cv_validation")
 async def ai_cv_validation(
-    verificationId: str = Form(...),
+    candidateId: str = Form(...),  # ✅ Changed from verificationId to candidateId
     panNumber: str = Form(None),  # Optional - PAN to check UAN
     hasUan: str = Form(None),  # Optional - "yes"/"no" to manually specify UAN status
     resume: UploadFile = File(None),  # Optional - upload file directly
     user: dict = Depends(requireAuth)
 ):
     """
-    AI CV Authenticity Validation - Check resume for abnormalities, overlaps, and inconsistencies
-    NO JD required - pure authenticity check
+    AI CV Authenticity Validation - Independent check (not part of primary/secondary/final stages)
     
     Parameters:
-    - verificationId: The verification record ID
+    - candidateId: The candidate ID (will find their verification record)
     - panNumber: Candidate's PAN number (optional - will check if UAN exists)
     - hasUan: Manual override - "yes" or "no" (optional - skips API call if provided)
     - resume: Optional resume file upload (PDF/DOCX)
@@ -6474,19 +6544,61 @@ async def ai_cv_validation(
     Resume Source Priority:
     1. If 'resume' file provided → use uploaded file (temp storage)
     2. Else → fetch from candidate.resumePath (supports both local path and S3 URL)
+    
+    Storage:
+    - Stored in verification.aiCvValidation field (NOT in stages)
+    - Billed separately in invoices
     """
     
     try:
-        # Verify verification record exists and user has access
-        verificationObjId = ObjectId(verificationId)
-        verification = await verificationsCol.find_one({"_id": verificationObjId})
+        # Get candidate details
+        try:
+            candidateObjId = ObjectId(candidateId)
+        except:
+            raise HTTPException(status_code=400, detail="Invalid candidate ID")
+        
+        candidate = await candidatesCol.find_one({"_id": candidateObjId})
+        
+        if not candidate:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        
+        candidateOrgId = str(candidate.get("organizationId"))
+        
+        # Find or create verification record for this candidate
+        verification = await verificationsCol.find_one({"candidateId": candidateId})
         
         if not verification:
-            raise HTTPException(status_code=404, detail="Verification record not found")
-        
-        # Get candidate details
-        candidateId = verification.get("candidateId")
-        candidate = await candidatesCol.find_one({"_id": ObjectId(candidateId)})
+            # ✅ Auto-create verification record if it doesn't exist
+            print(f"📝 No verification record found for candidate {candidateId}, creating one...")
+            
+            new_verification = {
+                "candidateId": candidateId,
+                "organizationId": candidateOrgId,
+                "stages": {
+                    "primary": [],
+                    "secondary": [],
+                    "final": []
+                },
+                "overallStatus": "NOT_STARTED",
+                "initiatedAt": datetime.now(timezone.utc).isoformat(),
+                "initiatedBy": user.get("email"),
+                "createdAt": datetime.now(timezone.utc).isoformat()
+            }
+            
+            result = await verificationsCol.insert_one(new_verification)
+            verificationObjId = result.inserted_id
+            
+            print(f"✅ Created verification record: {verificationObjId}")
+            
+            # Log activity
+            await logActivity(
+                user,
+                "Verification Record Created",
+                f"Auto-created verification record for {candidate.get('firstName', '')} {candidate.get('lastName', '')} via AI CV Validation",
+                "Success"
+            )
+        else:
+            verificationObjId = verification["_id"]
         
         if not candidate:
             raise HTTPException(status_code=404, detail="Candidate not found")
@@ -6670,7 +6782,7 @@ async def ai_cv_validation(
             print(f"📋 Determined candidate type from CV: {candidate_type}")
         
         # Step 3: Perform AI authenticity validation
-        print(f"🔍 Starting AI CV authenticity validation for verification {verificationId}")
+        print(f"🔍 Starting AI CV authenticity validation for candidate {candidateId}")
         print(f"📊 Candidate Type: {candidate_type}")
         print(f"📊 Has UAN: {has_uan_bool}")
         
@@ -6680,52 +6792,36 @@ async def ai_cv_validation(
         if not validation_result:
             raise HTTPException(status_code=500, detail="AI validation failed to return results")
         
-        # Find the ai_cv_validation check in the verification stages
-        stages = verification.get("stages", {})
-        updated = False
+        # ✅ Store in separate field (NOT in stages)
+        # This is an independent check, not part of primary/secondary/final stages
+        ai_cv_validation_data = {
+            "status": "COMPLETED",
+            "candidateType": candidate_type,
+            "uanNumber": uan_num,
+            "hasUan": has_uan_bool,
+            "uanVerificationNote": uan_verification_note,
+            "authenticity_score": validation_result.get("authenticity_score", 0),
+            "recommendation": validation_result.get("recommendation", "REVIEW_REQUIRED"),
+            "analysis": {
+                "candidate_profile": validation_result.get("candidate_profile", {}),
+                "positive_findings": validation_result.get("positive_findings", []),
+                "negative_findings": validation_result.get("negative_findings", []),
+                "education_analysis": validation_result.get("education_analysis", {}),
+                "employment_analysis": validation_result.get("employment_analysis", {}),
+                "timeline_analysis": validation_result.get("timeline_analysis", {}),
+                "red_flags": validation_result.get("red_flags", []),
+                "summary": validation_result.get("summary", ""),
+                "method": "OpenAI-GPT4o-mini-Authenticity"
+            },
+            "completedAt": datetime.now(timezone.utc).isoformat(),
+            "completedBy": user.get("email"),
+            "validation_id": str(uuid.uuid4())
+        }
         
-        for stage_name, checks in stages.items():
-            for check in checks:
-                if check.get("checkName") == "ai_cv_validation" or check.get("check") == "ai_cv_validation":
-                    # Update the check with AI results but keep PENDING status
-                    check.update({
-                        "status": "PENDING",  # Keep PENDING for manual review
-                        "aiAnalysisCompleted": True,  # Flag that AI analysis is done
-                        "aiAnalysisAt": datetime.now(timezone.utc),
-                        "aiAnalysisBy": user.get("email"),
-                        "candidateType": candidate_type,
-                        "uanNumber": uan_num,
-                        "hasUan": has_uan_bool,
-                        "uanVerificationNote": uan_verification_note,
-                        "aiAnalysis": {
-                            "authenticity_score": validation_result.get("authenticity_score", 0),
-                            "candidate_profile": validation_result.get("candidate_profile", {}),
-                            "positive_findings": validation_result.get("positive_findings", []),
-                            "negative_findings": validation_result.get("negative_findings", []),
-                            "education_analysis": validation_result.get("education_analysis", {}),
-                            "employment_analysis": validation_result.get("employment_analysis", {}),
-                            "timeline_analysis": validation_result.get("timeline_analysis", {}),
-                            "red_flags": validation_result.get("red_flags", []),
-                            "recommendation": validation_result.get("recommendation", "REVIEW_REQUIRED"),
-                            "summary": validation_result.get("summary", ""),
-                            "validation_id": str(uuid.uuid4()),
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "method": "OpenAI-GPT4o-mini-Authenticity"
-                        },
-                        "remarks": f"AI authenticity check completed. Score: {validation_result.get('authenticity_score', 0)}/100. Type: {candidate_type}. Recommendation: {validation_result.get('recommendation', 'REVIEW_REQUIRED')}. Awaiting manual review."
-                    })
-                    updated = True
-                    break
-            if updated:
-                break
-        
-        if not updated:
-            raise HTTPException(status_code=400, detail="AI CV validation check not found in verification stages")
-        
-        # Save updated verification
+        # Save in separate field in same verification record
         await verificationsCol.update_one(
             {"_id": verificationObjId},
-            {"$set": {"stages": stages}}
+            {"$set": {"aiCvValidation": ai_cv_validation_data}}
         )
         
         # Log activity
@@ -6745,7 +6841,8 @@ async def ai_cv_validation(
             status_code=200,
             content=jsonable_encoder({
                 "message": response_message,
-                "verificationId": verificationId,
+                "verificationId": str(verificationObjId),
+                "candidateId": candidateId,
                 "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip(),
                 "candidateType": candidate_type,
                 "uanNumber": uan_num,
@@ -6923,7 +7020,7 @@ async def submit_ai_cv_validation(
         
         allowed = False
         
-        
+
         if role in ["SUPER_ADMIN", "SUPER_SPOC"]:
             allowed = True
         elif role == "SPOC" and ("@bgv.local" in userEmail or "bgvapp.in" in userEmail):
@@ -7292,11 +7389,9 @@ async def forgot_password(
         # Build reset link
         reset_link = f"https://bgv-ey1e.onrender.com/reset-password?token={reset_token}"
         
-        # Send email with reset link using Gmail API
+        # Send email with reset link using SMTP
         try:
-            from utils.email_utils import _load_gmail_service
-            from email.mime.text import MIMEText
-            import base64
+            from utils.email_utils import send_email_smtp
             
             email_body = f"""
 Hi {user.get('userName', 'User')},
@@ -7313,18 +7408,11 @@ Best regards,
 BGV Team
 """
             
-            # Create email MIME object
-            message = MIMEText(email_body)
-            message["to"] = email
-            message["from"] = "me"
-            message["subject"] = "Password Reset Request"
-            
-            # Gmail API requires base64url encoding
-            raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-            
-            # Send via Gmail API
-            service = _load_gmail_service()
-            service.users().messages().send(userId="me", body={"raw": raw}).execute()
+            send_email_smtp(
+                to_email=email,
+                subject="Password Reset Request",
+                body=email_body
+            )
             
             print(f"✅ Password reset email sent to {email}")
             
@@ -8129,3 +8217,400 @@ async def ai_resume_screening_enhanced(
             "Error"
         )
         raise HTTPException(status_code=500, detail=f"Enhanced resume screening failed: {str(e)}")
+
+
+# ========================================
+# BATCH INVOICE GENERATION
+# ========================================
+
+class BatchInvoiceRequest(BaseModel):
+    organizationId: str
+    includeCompleted: bool = True  # Include verifications with overallStatus = "COMPLETED"
+    includePartial: bool = False   # Include verifications with any completed checks
+    startDate: Optional[str] = None  # Filter by date range (ISO format)
+    endDate: Optional[str] = None
+
+@app.post("/secure/generate_batch_invoice")
+async def generate_batch_invoice(
+    body: BatchInvoiceRequest,
+    user: dict = Depends(requireAuth)
+):
+    """
+    Generate batch invoice for an organization
+    
+    Permissions: SUPER_ADMIN and SUPER_SPOC only
+    
+    Features:
+    - Aggregates all completed verifications for an organization
+    - Calculates total billing based on completed checks
+    - Supports date range filtering
+    - Toggle between fully completed vs any completed checks
+    """
+    try:
+        # ========================================
+        # 1. PERMISSION CHECK - SUPER_ADMIN & SUPER_SPOC ONLY
+        # ========================================
+        role = user.get("role")
+        if role not in ["SUPER_ADMIN", "SUPER_SPOC"]:
+            raise HTTPException(
+                status_code=403, 
+                detail="Only SUPER_ADMIN and SUPER_SPOC can generate batch invoices"
+            )
+        
+        # ========================================
+        # 2. VALIDATE ORGANIZATION
+        # ========================================
+        try:
+            org_object_id = ObjectId(body.organizationId)
+        except:
+            raise HTTPException(status_code=400, detail="Invalid organization ID")
+        
+        organization = await orgsCol.find_one({"_id": org_object_id})
+        if not organization:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        
+        # ========================================
+        # 3. GET PRICING CONFIGURATION
+        # ========================================
+        services = organization.get("services", [])
+        if not services:
+            raise HTTPException(
+                status_code=400, 
+                detail="Organization services/pricing not configured"
+            )
+        
+        # Build pricing map
+        pricing_map = {}
+        for service in services:
+            service_name = service.get("serviceName")
+            service_price = service.get("price")
+            if service_name and service_price:
+                pricing_map[service_name] = float(service_price)
+        
+        # ========================================
+        # 4. BUILD VERIFICATION QUERY
+        # ========================================
+        query = {"organizationId": body.organizationId}
+        
+        # Filter by completion status
+        if body.includeCompleted and not body.includePartial:
+            # Only fully completed verifications
+            query["overallStatus"] = "COMPLETED"
+        elif body.includePartial and not body.includeCompleted:
+            # Only verifications with some completed checks (but not fully completed)
+            query["overallStatus"] = {"$ne": "COMPLETED"}
+            query["stages"] = {"$exists": True}
+        # If both are True, include all verifications with any completed checks
+        
+        # Date range filter - flexible to handle different date formats
+        if body.startDate or body.endDate:
+            # First, check what date field exists in verifications
+            sample_verification = await verificationsCol.find_one(
+                {"organizationId": body.organizationId}
+            )
+            
+            if sample_verification:
+                # Check which date field exists
+                date_field = None
+                date_value = None
+                
+                for field in ["createdAt", "initiatedAt", "updatedAt", "_id"]:
+                    if field in sample_verification and sample_verification[field] is not None:
+                        date_field = field
+                        date_value = sample_verification[field]
+                        break
+                
+                print(f"🔍 Using date field: {date_field}, type: {type(date_value)}, value: {date_value}")
+                
+                if date_field and date_field != "_id":
+                    date_filter = {}
+                    
+                    # If stored as datetime objects, convert input strings to datetime
+                    if isinstance(date_value, datetime):
+                        if body.startDate:
+                            start_dt = datetime.fromisoformat(body.startDate.replace('Z', '+00:00'))
+                            date_filter["$gte"] = start_dt
+                        if body.endDate:
+                            end_dt = datetime.fromisoformat(body.endDate.replace('Z', '+00:00'))
+                            date_filter["$lte"] = end_dt
+                    # If stored as strings, normalize both formats for comparison
+                    else:
+                        # Normalize the stored format and input format
+                        if body.startDate:
+                            # Convert input to match stored format
+                            start_input = body.startDate.replace('Z', '+00:00')
+                            date_filter["$gte"] = start_input
+                        if body.endDate:
+                            # Convert input to match stored format
+                            end_input = body.endDate.replace('Z', '+00:00')
+                            date_filter["$lte"] = end_input
+                    
+                    query[date_field] = date_filter
+                    print(f"🔍 Date filter query on {date_field}: {date_filter}")
+                elif date_field == "_id":
+                    # Use ObjectId timestamp if no date field exists
+                    print("⚠️ No date field found, using ObjectId timestamp")
+                    # Convert dates to ObjectId for filtering
+                    if body.startDate:
+                        start_dt = datetime.fromisoformat(body.startDate.replace('Z', '+00:00'))
+                        start_oid = ObjectId.from_datetime(start_dt)
+                        query["_id"] = {"$gte": start_oid}
+                    if body.endDate:
+                        end_dt = datetime.fromisoformat(body.endDate.replace('Z', '+00:00'))
+                        end_oid = ObjectId.from_datetime(end_dt)
+                        if "_id" in query:
+                            query["_id"]["$lte"] = end_oid
+                        else:
+                            query["_id"] = {"$lte": end_oid}
+                else:
+                    print("⚠️ No date field available for filtering, ignoring date range")
+        
+        # ========================================
+        # 5. FETCH VERIFICATIONS
+        # ========================================
+        print(f"🔍 Final query: {query}")
+        verifications = await verificationsCol.find(query).to_list(1000)
+        print(f"🔍 Found {len(verifications)} verifications")
+        
+        if not verifications:
+            raise HTTPException(
+                status_code=404, 
+                detail="No verifications found matching the criteria"
+            )
+        
+        # ========================================
+        # 6. PROCESS EACH VERIFICATION
+        # ========================================
+        batch_items = []
+        total_amount = 0.0
+        missing_prices = set()
+        verification_summary = []
+        
+        for verification in verifications:
+            verification_id = str(verification["_id"])
+            candidate_id = verification.get("candidateId")
+            
+            # Get candidate details
+            candidate = None
+            if candidate_id:
+                try:
+                    candidate = await candidatesCol.find_one({"_id": ObjectId(candidate_id)})
+                except:
+                    pass
+            
+            # Process checks in this verification
+            verification_total = 0.0
+            verification_items = []
+            
+            stages = verification.get("stages", {})
+            for stage_name, checks in stages.items():
+                for check in checks:
+                    check_name = check.get("check") or check.get("checkName")
+                    check_status = check.get("status")
+                    
+                    if not check_name:
+                        continue
+                    
+                    # Only bill COMPLETED checks
+                    if check_status == "COMPLETED":
+                        price = pricing_map.get(check_name)
+                        
+                        if price is None:
+                            missing_prices.add(check_name)
+                            continue
+                        
+                        verification_items.append({
+                            "checkName": check_name,
+                            "stage": stage_name,
+                            "price": price,
+                            "completedAt": check.get("submittedAt")
+                        })
+                        
+                        verification_total += price
+            
+            # ✅ Process AI CV Validation (independent check, not in stages)
+            ai_cv = verification.get("aiCvValidation")
+            if ai_cv and ai_cv.get("status") == "COMPLETED":
+                # Try multiple possible service names
+                price = pricing_map.get("ai_cv_validation") or pricing_map.get("AI CV Validation")
+                if price:
+                    verification_items.append({
+                        "checkName": "AI CV Validation",
+                        "stage": "independent",  # Not part of primary/secondary/final
+                        "price": price,
+                        "completedAt": ai_cv.get("completedAt")
+                    })
+                    verification_total += price
+                else:
+                    missing_prices.add("AI CV Validation")
+            
+            # Only include verifications with completed checks
+            if verification_items:
+                batch_items.extend(verification_items)
+                total_amount += verification_total
+                
+                verification_summary.append({
+                    "verificationId": verification_id,
+                    "candidateName": f"{candidate.get('firstName', '')} {candidate.get('lastName', '')}".strip() if candidate else "N/A",
+                    "candidateEmail": candidate.get("email", "N/A") if candidate else "N/A",
+                    "overallStatus": verification.get("overallStatus", "N/A"),
+                    "completedChecks": len(verification_items),
+                    "verificationTotal": round(verification_total, 2),
+                    "createdAt": verification.get("createdAt")
+                })
+        
+        # ========================================
+        # 7. CALCULATE TOTALS
+        # ========================================
+        if not batch_items:
+            raise HTTPException(
+                status_code=404, 
+                detail="No completed checks found for billing"
+            )
+        
+        # Calculate tax (18% GST)
+        tax = total_amount * 0.18
+        grand_total = total_amount + tax
+        
+        # ========================================
+        # 8. BUILD BATCH INVOICE
+        # ========================================
+        invoice_number = f"BATCH-INV-{datetime.now().strftime('%Y%m%d')}-{str(org_object_id)[-6:]}"
+        
+        batch_invoice = {
+            "invoiceType": "BATCH",
+            "invoiceNumber": invoice_number,
+            "invoiceDate": datetime.now(timezone.utc).isoformat(),
+            
+            # Organization details
+            "organization": {
+                "organizationId": body.organizationId,
+                "organizationName": organization.get("organizationName", "N/A"),
+                "email": organization.get("email", "N/A"),
+                "phone": organization.get("phone", "N/A"),
+                "gstNumber": organization.get("gstNumber", "N/A"),
+                "address": organization.get("address", "N/A")
+            },
+            
+            # Billing period
+            "billingPeriod": {
+                "startDate": body.startDate or "N/A",
+                "endDate": body.endDate or datetime.now(timezone.utc).isoformat()
+            },
+            
+            # Summary
+            "summary": {
+                "totalVerifications": len(verification_summary),
+                "totalCompletedChecks": len(batch_items),
+                "includeCompleted": body.includeCompleted,
+                "includePartial": body.includePartial
+            },
+            
+            # Verification breakdown
+            "verifications": verification_summary,
+            
+            # All completed checks (itemized)
+            "items": batch_items,
+            "totalItems": len(batch_items),
+            
+            # Pricing
+            "subtotal": round(total_amount, 2),
+            "taxRate": 0.18,
+            "tax": round(tax, 2),
+            "grandTotal": round(grand_total, 2),
+            "currency": "INR",
+            
+            # Warnings
+            "warnings": list(missing_prices) if missing_prices else None,
+            
+            # Metadata
+            "generatedBy": user.get("email"),
+            "generatedAt": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # ========================================
+        # 9. SAVE TO DATABASE
+        # ========================================
+        invoicesCol = db["invoices"]
+        result = await invoicesCol.insert_one({
+            **batch_invoice,
+            "createdAt": datetime.now(timezone.utc),
+            "createdBy": user.get("email")
+        })
+        
+        batch_invoice["invoiceId"] = str(result.inserted_id)
+        
+        # ========================================
+        # 10. LOG ACTIVITY
+        # ========================================
+        await logActivity(
+            user,
+            "Batch Invoice Generated",
+            f"Generated batch invoice {invoice_number} for {organization.get('organizationName')} - "
+            f"{len(verification_summary)} verifications, ₹{grand_total:.2f}",
+            "Success"
+        )
+        
+        return JSONResponse(
+            status_code=200, 
+            content=jsonable_encoder(batch_invoice)
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Batch invoice generation error: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to generate batch invoice: {str(e)}"
+        )
+
+
+@app.get("/secure/get_batch_invoices")
+async def get_batch_invoices(
+    organizationId: Optional[str] = Query(None),
+    user: dict = Depends(requireAuth)
+):
+    """
+    Get all batch invoices
+    
+    Permissions: SUPER_ADMIN and SUPER_SPOC can see all
+    """
+    try:
+        role = user.get("role")
+        
+        # Only SUPER_ADMIN and SUPER_SPOC can access
+        if role not in ["SUPER_ADMIN", "SUPER_SPOC"]:
+            raise HTTPException(
+                status_code=403, 
+                detail="Only SUPER_ADMIN and SUPER_SPOC can view batch invoices"
+            )
+        
+        # Build query
+        query = {"invoiceType": "BATCH"}
+        if organizationId:
+            query["organization.organizationId"] = organizationId
+        
+        # Fetch invoices
+        invoicesCol = db["invoices"]
+        invoices = await invoicesCol.find(query).sort("createdAt", -1).to_list(100)
+        
+        # Convert ObjectId to string
+        for invoice in invoices:
+            invoice["_id"] = str(invoice["_id"])
+        
+        return JSONResponse(
+            status_code=200,
+            content=jsonable_encoder({
+                "invoices": invoices,
+                "total": len(invoices)
+            })
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch batch invoices: {str(e)}"
+        )
