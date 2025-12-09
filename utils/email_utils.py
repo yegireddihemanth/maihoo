@@ -293,3 +293,197 @@ BGVApp Verification Team
     except Exception as e:
         print(f"Error sending verification consent email: {str(e)}")
         raise Exception(f"Email sending failed: {str(e)}")
+
+
+
+def send_manual_verification_email(
+    to_email: str,
+    check_name: str,
+    candidate_data: dict,
+    check_specific_data: dict,
+    organization_name: str
+):
+    """
+    Send email to verification team (SUPER_ADMIN/SUPER_SPOC) for manual verification
+    
+    Args:
+        to_email: Recipient email (SUPER_ADMIN/SUPER_SPOC/SUPER_ADMIN_HELPER)
+        check_name: Name of the manual check
+        candidate_data: Candidate information
+        check_specific_data: Check-specific data (supervisor contact, certificate URL, etc.)
+        organization_name: Organization requesting verification
+    """
+    
+    candidate_name = f"{candidate_data.get('firstName', '')} {candidate_data.get('lastName', '')}".strip()
+    candidate_email = candidate_data.get('email', 'N/A')
+    candidate_phone = candidate_data.get('phone', 'N/A')
+    
+    # Build check-specific details
+    check_details = ""
+    
+    if check_name == "supervisory_check_1":
+        check_details = f"""
+Supervisor Details (Reference 1):
+- Name: {check_specific_data.get('name', 'N/A')}
+- Phone: {check_specific_data.get('phone', 'N/A')}
+- Email: {check_specific_data.get('email', 'N/A')}
+- Relationship: {check_specific_data.get('relationship', 'N/A')}
+- Company: {check_specific_data.get('company', 'N/A')}
+- Designation: {check_specific_data.get('designation', 'N/A')}
+- Working Period: {check_specific_data.get('workingPeriod', 'N/A')}
+
+Action Required:
+Contact the supervisor and verify:
+1. Candidate's employment details
+2. Job responsibilities and performance
+3. Reason for leaving
+4. Eligibility for rehire
+"""
+    
+    elif check_name == "supervisory_check_2":
+        check_details = f"""
+Supervisor Details (Reference 2):
+- Name: {check_specific_data.get('name', 'N/A')}
+- Phone: {check_specific_data.get('phone', 'N/A')}
+- Email: {check_specific_data.get('email', 'N/A')}
+- Relationship: {check_specific_data.get('relationship', 'N/A')}
+- Company: {check_specific_data.get('company', 'N/A')}
+- Designation: {check_specific_data.get('designation', 'N/A')}
+- Working Period: {check_specific_data.get('workingPeriod', 'N/A')}
+
+Action Required:
+Contact the supervisor and verify:
+1. Candidate's employment details
+2. Job responsibilities and performance
+3. Reason for leaving
+4. Eligibility for rehire
+"""
+    
+    elif check_name in ["employment_history_manual", "employment_check_2"]:
+        check_details = f"""
+Employment Details:
+- Company: {check_specific_data.get('company', 'N/A')}
+- Designation: {check_specific_data.get('designation', 'N/A')}
+- Joining Date: {check_specific_data.get('joiningDate', 'N/A')}
+- Relieving Date: {check_specific_data.get('relievingDate', 'N/A')}
+- HR Contact: {check_specific_data.get('hrContact', 'N/A')}
+- HR Email: {check_specific_data.get('hrEmail', 'N/A')}
+- HR Name: {check_specific_data.get('hrName', 'N/A')}
+- Address: {check_specific_data.get('address', 'N/A')}
+
+Documents:
+- Relieving Letter: {check_specific_data.get('relievingLetterUrl', 'Not provided')}
+- Experience Letter: {check_specific_data.get('experienceLetterUrl', 'Not provided')}
+- Salary Slips: {check_specific_data.get('salarySlipsUrl', 'Not provided')}
+
+Action Required:
+1. Download and review the documents
+2. Contact HR to verify employment details
+3. Verify dates, designation, and reason for leaving
+4. Submit verification result
+"""
+    
+    elif check_name == "employment_history_manual_2":
+        check_details = f"""
+Employment Details (Previous Employment):
+- Company: {check_specific_data.get('company', 'N/A')}
+- Designation: {check_specific_data.get('designation', 'N/A')}
+- Joining Date: {check_specific_data.get('joiningDate', 'N/A')}
+- Relieving Date: {check_specific_data.get('relievingDate', 'N/A')}
+- HR Contact: {check_specific_data.get('hrContact', 'N/A')}
+- HR Email: {check_specific_data.get('hrEmail', 'N/A')}
+- HR Name: {check_specific_data.get('hrName', 'N/A')}
+- Address: {check_specific_data.get('address', 'N/A')}
+
+Documents:
+- Relieving Letter: {check_specific_data.get('relievingLetterUrl', 'Not provided')}
+- Experience Letter: {check_specific_data.get('experienceLetterUrl', 'Not provided')}
+- Salary Slips: {check_specific_data.get('salarySlipsUrl', 'Not provided')}
+
+Action Required:
+1. Download and review the documents
+2. Contact HR to verify employment details
+3. Verify dates, designation, and reason for leaving
+4. Submit verification result
+"""
+    
+    elif check_name == "education_check_manual":
+        check_details = f"""
+Education Details:
+- Degree: {check_specific_data.get('degree', 'N/A')}
+- Specialization: {check_specific_data.get('specialization', 'N/A')}
+- University: {check_specific_data.get('universityName', 'N/A')}
+- College: {check_specific_data.get('collegeName', 'N/A')}
+- Year of Passing: {check_specific_data.get('yearOfPassing', 'N/A')}
+- CGPA/Percentage: {check_specific_data.get('cgpa', 'N/A')}
+
+University Contact:
+- Phone: {check_specific_data.get('universityContact', 'N/A')}
+- Email: {check_specific_data.get('universityEmail', 'N/A')}
+- Address: {check_specific_data.get('universityAddress', 'N/A')}
+
+College Contact:
+- Phone: {check_specific_data.get('collegeContact', 'N/A')}
+- Email: {check_specific_data.get('collegeEmail', 'N/A')}
+- Address: {check_specific_data.get('collegeAddress', 'N/A')}
+
+Documents:
+- Certificate: {check_specific_data.get('certificateUrl', 'Not provided')}
+- Marksheet: {check_specific_data.get('marksheetUrl', 'Not provided')}
+
+Action Required:
+1. Download and review the certificate/marksheet
+2. Contact university/college to verify authenticity
+3. Verify degree, year of passing, and grades
+4. Submit verification result
+"""
+    
+    else:
+        check_details = f"""
+Check-specific data:
+{check_specific_data}
+
+Action Required:
+Please review the provided information and complete the verification.
+"""
+    
+    # Build email body
+    body = f"""
+Manual Verification Required
+
+Organization: {organization_name}
+Check Type: {check_name}
+
+Candidate Information:
+- Name: {candidate_name}
+- Email: {candidate_email}
+- Phone: {candidate_phone}
+- PAN: {candidate_data.get('panNumber', 'N/A')}
+- Aadhaar: {candidate_data.get('aadhaarNumber', 'N/A')}
+
+{check_details}
+
+Please complete this verification and submit the result through the verification portal.
+
+---
+This is an automated email from BGV Verification System.
+"""
+    
+    try:
+        print(f"📧 Sending manual verification email for {check_name}")
+        print(f"   To: {to_email}")
+        print(f"   Candidate: {candidate_name}")
+        print(f"   Organization: {organization_name}")
+        
+        send_email_smtp(
+            to_email=to_email,
+            subject=f"Manual Verification Required - {check_name} - {candidate_name}",
+            body=body
+        )
+        
+        print(f"✅ Manual verification email sent successfully")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Failed to send manual verification email: {e}")
+        return False

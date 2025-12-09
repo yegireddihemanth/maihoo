@@ -1,0 +1,90 @@
+{
+  "_id": "ObjectId will be auto-generated",
+  "firstName": "Rajesh",
+  "lastName": "Kumar",
+  "email": "rajesh.kumar@example.com",
+  "phone": "+91-9876543210",
+  "dateOfBirth": "1995-05-15",
+  "gender": "Male",
+  "address": "Flat 301, Green Valley Apartments, MG Road, Bangalore",
+  "district": "Bangalore Urban",
+  "state": "Karnataka",
+  "pincode": "560001",
+  "organizationId": "692408fc28187fc1976b7499",
+  
+  "panNumber": "ABCDE1234F",
+  "aadhaarNumber": "123456789012",
+  "uanNumber": "101234567890",
+  
+  "resumePath": "https://maihoofiles.s3.ap-south-2.amazonaws.com/TVA/Rajesh_Kumar/resume.pdf",
+  
+  "supervisoryCheck1": {
+    "name": "Priya Sharma",
+    "phone": "+91-9123456789",
+    "email": "priya.sharma@previouscompany.com",
+    "relationship": "Former Manager",
+    "company": "Tech Solutions Pvt Ltd",
+    "designation": "Senior Manager - Engineering",
+    "workingPeriod": "2020-2023"
+  },
+  
+  "supervisoryCheck2": {
+    "name": "Amit Patel",
+    "phone": "+91-9234567890",
+    "email": "amit.patel@oldcompany.com",
+    "relationship": "Former Team Lead",
+    "company": "Digital Innovations Inc",
+    "designation": "Team Lead - Development",
+    "workingPeriod": "2018-2020"
+  },
+  
+  "employmentHistory1": {
+    "company": "Tech Solutions Pvt Ltd",
+    "designation": "Senior Software Engineer",
+    "joiningDate": "2020-06-01",
+    "relievingDate": "2023-08-31",
+    "hrContact": "+91-9345678901",
+    "hrEmail": "hr@techsolutions.com",
+    "hrName": "Sneha Reddy",
+    "address": "Tech Park, Phase 2, Whitefield, Bangalore - 560066",
+    "relievingLetterUrl": "https://maihoofiles.s3.ap-south-2.amazonaws.com/TVA/Rajesh_Kumar/relieving_letter_1.pdf",
+    "experienceLetterUrl": "https://maihoofiles.s3.ap-south-2.amazonaws.com/TVA/Rajesh_Kumar/experience_letter_1.pdf",
+    "salarySlipsUrl": "https://maihoofiles.s3.ap-south-2.amazonaws.com/TVA/Rajesh_Kumar/salary_slips_1.pdf"
+  },
+  
+  "employmentHistory2": {
+    "company": "Digital Innovations Inc",
+    "designation": "Software Engineer",
+    "joiningDate": "2018-07-15",
+    "relievingDate": "2020-05-30",
+    "hrContact": "+91-9456789012",
+    "hrEmail": "hr@digitalinnovations.com",
+    "hrName": "Vikram Singh",
+    "address": "Electronic City, Phase 1, Bangalore - 560100",
+    "relievingLetterUrl": "https://maihoofiles.s3.ap-south-2.amazonaws.com/TVA/Rajesh_Kumar/relieving_letter_2.pdf",
+    "experienceLetterUrl": "https://maihoofiles.s3.ap-south-2.amazonaws.com/TVA/Rajesh_Kumar/experience_letter_2.pdf",
+    "salarySlipsUrl": "https://maihoofiles.s3.ap-south-2.amazonaws.com/TVA/Rajesh_Kumar/salary_slips_2.pdf"
+  },
+  
+  "educationCheck": {
+    "certificateUrl": "https://maihoofiles.s3.ap-south-2.amazonaws.com/TVA/Rajesh_Kumar/degree_certificate.pdf",
+    "marksheetUrl": "https://maihoofiles.s3.ap-south-2.amazonaws.com/TVA/Rajesh_Kumar/marksheet.pdf",
+    "degree": "Bachelor of Technology",
+    "specialization": "Computer Science Engineering",
+    "universityName": "Visvesvaraya Technological University",
+    "collegeName": "RV College of Engineering",
+    "yearOfPassing": "2018",
+    "cgpa": "8.5",
+    "universityContact": "+91-9567890123",
+    "universityEmail": "verification@vtu.ac.in",
+    "universityAddress": "Jnana Sangama, Belagavi, Karnataka - 590018",
+    "collegeContact": "+91-9678901234",
+    "collegeEmail": "admissions@rvce.edu.in",
+    "collegeAddress": "Mysore Road, Bangalore - 560059"
+  },
+  
+  "status": "PENDING",
+  "createdBy": "admin@bgvapp.in",
+  "createdAt": "2024-12-07T18:00:00.000Z",
+  "updatedAt": "2024-12-07T18:00:00.000Z"
+}

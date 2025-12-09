@@ -274,27 +274,65 @@ async def verify_ai_education_validation(candidate: dict):
 # 📌 Dispatcher (FULL — ONLY FIXED pan_aadhaar)
 # ---------------------------------------------------
 def validate_fields(check_type, candidate):
+    """
+    Validate if candidate has required fields for a specific check
+    Returns: (is_valid: bool, missing_field: str or None)
+    """
     required = {
+        # Automated API checks
         "pan_aadhaar_seeding": ["aadhaarNumber", "panNumber"],
         "pan_verification": ["panNumber"],
         "employment_history": ["uanNumber"],
         "verify_pan_to_uan": ["panNumber"],
         "credit_report": ["phone", "panNumber", "firstName", "lastName"],
         "court_record": ["firstName", "lastName", "address"],
-        "resume_validation": ["resumePath"],  # resume must already be uploaded
+        "resume_validation": ["resumePath"],
         
-        # Internal verification checks
-        "address_verification": ["address"],  # basic address required
-        "education_check_manual": ["firstName", "lastName"],  # basic name required
-        "ai_cv_validation": ["firstName", "lastName"],  # AI CV validation check
-        "supervisory_check": ["firstName", "lastName"],  # basic name required
-        "employment_history_manual": ["firstName", "lastName"]  # basic name required
+        # Manual verification checks - NEW REQUIREMENTS
+        "supervisory_check_1": ["supervisoryCheck1"],
+        "supervisory_check_2": ["supervisoryCheck2"],
+        "employment_check_2": ["employmentHistory2"],
+        "employment_history_manual": ["employmentHistory1"],
+        "employment_history_manual_2": ["employmentHistory2"],
+        "education_check_manual": ["educationCheck"],
+        
+        # Legacy manual checks (basic requirements)
+        "address_verification": ["address"],
+        "ai_cv_validation": ["firstName", "lastName"],
+        "supervisory_check": ["firstName", "lastName"]
     }
 
     fields = required.get(check_type, [])
+    
     for field in fields:
-        if not candidate.get(field):
+        field_data = candidate.get(field)
+        
+        # Check if field exists
+        if not field_data:
             return False, field
+        
+        # For nested objects (manual check data), validate sub-fields
+        if isinstance(field_data, dict):
+            # Supervisory checks need name and phone
+            if field in ["supervisoryCheck1", "supervisoryCheck2"]:
+                if not field_data.get("name") or not field_data.get("phone"):
+                    return False, f"{field} (requires name and phone)"
+            
+            # Employment checks need company, HR contact, and relieving letter (MANDATORY)
+            elif field in ["employmentHistory1", "employmentHistory2"]:
+                if not field_data.get("company") or not field_data.get("hrContact"):
+                    return False, f"{field} (requires company and hrContact)"
+                # Relieving letter is MANDATORY
+                if not field_data.get("relievingLetterUrl"):
+                    return False, f"{field} (requires relievingLetterUrl document)"
+            
+            # Education check needs certificate and university contact (MANDATORY)
+            elif field == "educationCheck":
+                if not field_data.get("certificateUrl"):
+                    return False, f"{field} (requires certificateUrl document)"
+                if not field_data.get("universityContact"):
+                    return False, f"{field} (requires universityContact)"
+    
     return True, None
 
 
@@ -345,7 +383,19 @@ async def run_verification(check_type: str, candidate: dict):
     if check_type == "supervisory_check":
         return await verify_supervisory_check(candidate)
     
+    if check_type == "supervisory_check_1":
+        return await verify_supervisory_check(candidate)
+    
+    if check_type == "supervisory_check_2":
+        return await verify_supervisory_check(candidate)
+    
     if check_type == "employment_history_manual":
+        return await verify_employment_history_manual(candidate)
+    
+    if check_type == "employment_history_manual_2":
+        return await verify_employment_history_manual(candidate)
+    
+    if check_type == "employment_check_2":
         return await verify_employment_history_manual(candidate)
 
     return "FAILED", f"Unknown check type: {check_type}"

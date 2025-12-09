@@ -2154,6 +2154,33 @@ async def initiateStageVerification(body: dict = Body(...), user: dict = Depends
         raise HTTPException(status_code=403, detail="Not authorized")
 
     # -------------------------------
+    # ✅ VALIDATE REQUIRED DATA FOR MANUAL CHECKS
+    # -------------------------------
+    from apis import validate_fields
+    
+    missing_data = []
+    for check_name in stageList:
+        ok, missing_field = validate_fields(check_name, candidate)
+        if not ok:
+            missing_data.append({
+                "check": check_name,
+                "missingField": missing_field,
+                "message": f"Check '{check_name}' requires '{missing_field}' in candidate data"
+            })
+    
+    # If any required data is missing, return error
+    if missing_data:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Missing required data for checks",
+                "missingData": missing_data,
+                "action": "Please update candidate information before initiating these checks",
+                "candidateId": candidateId
+            }
+        )
+    
+    # -------------------------------
     # ENSURE ORGANIZATION EXISTS
     # -------------------------------
     try:
@@ -2431,6 +2458,67 @@ async def runStage(body: dict = Body(...), user: dict = Depends(requireAuth)):
         # RUN actual verification (your real API)
         # -----------------------------------------
         status, remarks = await run_verification(checkName, candidate)
+        
+        # ✅ NEW: Send email for manual checks (status = PENDING)
+        if status == "PENDING":
+            print(f"📧 Manual check detected: {checkName} - Sending notification emails")
+            
+            # Get organization details
+            org = await orgsCol.find_one({"_id": ObjectId(verificationOrgId)})
+            org_name = org.get("organizationName", "Unknown") if org else "Unknown"
+            
+            # Get check-specific data from candidate
+            check_data_map = {
+                "supervisory_check_1": candidate.get("supervisoryCheck1", {}),
+                "supervisory_check_2": candidate.get("supervisoryCheck2", {}),
+                "employment_history_manual": candidate.get("employmentHistory1", {}),
+                "employment_history_manual_2": candidate.get("employmentHistory2", {}),
+                "employment_check_2": candidate.get("employmentHistory2", {}),
+                "education_check_manual": candidate.get("educationCheck", {})
+            }
+            
+            check_specific_data = check_data_map.get(checkName, {})
+            
+            # Find all SUPER_ADMIN, SUPER_SPOC, and authorized SUPER_ADMIN_HELPER
+            recipients = []
+            
+            # Get SUPER_ADMIN and SUPER_SPOC
+            super_users = await usersCol.find({
+                "role": {"$in": ["SUPER_ADMIN", "SUPER_SPOC"]},
+                "isActive": True
+            }).to_list(100)
+            
+            for su in super_users:
+                recipients.append(su.get("email"))
+            
+            # Get SUPER_ADMIN_HELPER with access to this org
+            helpers = await usersCol.find({
+                "role": "SUPER_ADMIN_HELPER",
+                "isActive": True,
+                "accessibleOrganizations": verificationOrgId
+            }).to_list(100)
+            
+            for helper in helpers:
+                recipients.append(helper.get("email"))
+            
+            # Send emails
+            from utils.email_utils import send_manual_verification_email
+            
+            for recipient in recipients:
+                if recipient:
+                    try:
+                        send_manual_verification_email(
+                            to_email=recipient,
+                            check_name=checkName,
+                            candidate_data=candidate,
+                            check_specific_data=check_specific_data,
+                            organization_name=org_name
+                        )
+                    except Exception as email_error:
+                        print(f"⚠️ Failed to send email to {recipient}: {email_error}")
+            
+            print(f"✅ Sent {len(recipients)} notification emails for {checkName}")
+        
         # LOG THE VERIFICATION CALL HERE
         await logActivity(
             user,
@@ -6190,9 +6278,15 @@ async def updateInternalVerification(body: dict = Body(...), user: dict = Depend
     # Internal verification checks that can be manually updated
     internal_checks = [
         "address_verification",
-        "education_check_manual", 
+        "education_check_manual",
+        "education_check_ai",
         "supervisory_check",
-        "employment_history_manual"
+        "supervisory_check_1",
+        "supervisory_check_2",
+        "employment_history_manual",
+        "employment_history_manual_2",
+        "employment_check_2",
+        "ai_education_validation"
     ]
     
     if checkName not in internal_checks:
@@ -6240,6 +6334,53 @@ async def updateInternalVerification(body: dict = Body(...), user: dict = Depend
     if not allowed:
         raise HTTPException(status_code=403, detail="You are not authorized to update this verification")
     
+    # ✅ Fetch candidate to get proof documents
+    candidate = await candidatesCol.find_one({"_id": ObjectId(candidateId)})
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    
+    # ✅ Auto-fetch proof documents based on check type
+    auto_attachments = []
+    
+    if checkName == "supervisory_check_1":
+        # No documents, just contact info (already in email)
+        pass
+    
+    elif checkName == "supervisory_check_2":
+        # No documents, just contact info
+        pass
+    
+    elif checkName in ["employment_history_manual", "employment_check_2"]:
+        emp_data = candidate.get("employmentHistory1", {})
+        if emp_data.get("relievingLetterUrl"):
+            auto_attachments.append(emp_data["relievingLetterUrl"])
+        if emp_data.get("experienceLetterUrl"):
+            auto_attachments.append(emp_data["experienceLetterUrl"])
+        if emp_data.get("salarySlipsUrl"):
+            auto_attachments.append(emp_data["salarySlipsUrl"])
+    
+    elif checkName == "employment_history_manual_2":
+        emp_data = candidate.get("employmentHistory2", {})
+        if emp_data.get("relievingLetterUrl"):
+            auto_attachments.append(emp_data["relievingLetterUrl"])
+        if emp_data.get("experienceLetterUrl"):
+            auto_attachments.append(emp_data["experienceLetterUrl"])
+        if emp_data.get("salarySlipsUrl"):
+            auto_attachments.append(emp_data["salarySlipsUrl"])
+    
+    elif checkName in ["education_check_manual", "education_check_ai", "ai_education_validation"]:
+        edu_data = candidate.get("educationCheck", {})
+        if edu_data.get("certificateUrl"):
+            auto_attachments.append(edu_data["certificateUrl"])
+        if edu_data.get("marksheetUrl"):
+            auto_attachments.append(edu_data["marksheetUrl"])
+    
+    # Merge auto-fetched attachments with manually provided ones
+    final_attachments = list(set(auto_attachments + attachments))
+    
+    print(f"📎 Auto-fetched {len(auto_attachments)} proof documents for {checkName}")
+    print(f"📎 Final attachments: {final_attachments}")
+    
     # Find and update the specific check
     stages = ver.get("stages", {})
     stageChecks = stages.get(stage, [])
@@ -6252,8 +6393,7 @@ async def updateInternalVerification(body: dict = Body(...), user: dict = Depend
             stageChecks[i]["remarks"] = remarks
             stageChecks[i]["submittedAt"] = datetime.now(timezone.utc).isoformat()
             stageChecks[i]["updatedBy"] = userEmail
-            if attachments:
-                stageChecks[i]["attachments"] = attachments
+            stageChecks[i]["attachments"] = final_attachments  # ✅ Auto-attached proofs
             checkFound = True
             break
     
