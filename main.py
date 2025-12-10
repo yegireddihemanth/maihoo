@@ -2569,32 +2569,26 @@ async def runStage(body: dict = Body(...), user: dict = Depends(requireAuth)):
             }}
         )
 
-        # REAL FAILURE → STOP
+        # REAL FAILURE → Mark as failed but CONTINUE to next checks
         if status == "FAILED":
-            await verificationsCol.update_one(
-                {"_id": verObjId},
-                {"$set": {
-                    "overallStatus": "FAILED",
-                    "failureStage": f"{stage}_{checkName}",
-                    "currentStage": stage
-                }}
-            )
-            await candidatesCol.update_one(
-                {"_id": ObjectId(candidateId)},
-                {"$set": {"status": f"FAILED_AT_{stage}_{checkName}"}}
-            )
-            return {
-                "message": "Check failed",
-                "failedCheck": checkName,
-                "status": "FAILED"
-            }
+            print(f"❌ Check {checkName} failed, but continuing with remaining checks...")
+            # Don't return here - continue to next check
 
     # -------------------------------------------------------
-    # FINAL STAGE FULL COMPLETION
+    # FINAL STAGE COMPLETION CHECK
     # -------------------------------------------------------
     verLatest = await verificationsCol.find_one({"_id": verObjId})
     stageChecksLatest = verLatest.get("stages", {}).get(stage, [])
 
+    # Check if all checks are done (COMPLETED or FAILED)
+    all_checks_done = len(stageChecksLatest) > 0 and all(
+        ch.get("status") in ["COMPLETED", "FAILED"] for ch in stageChecksLatest
+    )
+    
+    # Check if any check failed
+    any_failed = any(ch.get("status") == "FAILED" for ch in stageChecksLatest)
+    
+    # Check if all completed successfully
     stageCompletedNow = len(stageChecksLatest) > 0 and all(
         ch.get("status") == "COMPLETED" for ch in stageChecksLatest
     )
@@ -2622,7 +2616,37 @@ async def runStage(body: dict = Body(...), user: dict = Depends(requireAuth)):
         }
 
     # -------------------------------------------------------
-    # NORMAL STAGE COMPLETION
+    # STAGE COMPLETION - Check for failures
+    # -------------------------------------------------------
+    if all_checks_done and any_failed:
+        # All checks done but some failed
+        failed_checks = [ch.get("check") for ch in stageChecksLatest if ch.get("status") == "FAILED"]
+        
+        await verificationsCol.update_one(
+            {"_id": verObjId},
+            {"$set": {
+                "currentStage": stage,
+                "overallStatus": "FAILED",
+                "failureStage": stage,
+                "failedChecks": failed_checks
+            }}
+        )
+        
+        await candidatesCol.update_one(
+            {"_id": ObjectId(candidateId)},
+            {"$set": {"status": f"FAILED_AT_{stage}"}}
+        )
+        
+        return {
+            "message": f"Stage completed with {len(failed_checks)} failed check(s)",
+            "stage": stage,
+            "verificationId": verificationId,
+            "overallStatus": "FAILED",
+            "failedChecks": failed_checks
+        }
+    
+    # -------------------------------------------------------
+    # NORMAL STAGE COMPLETION (all passed or still in progress)
     # -------------------------------------------------------
     await verificationsCol.update_one(
         {"_id": verObjId},
@@ -3953,6 +3977,69 @@ async def addCandidate(
     pincode: str = Form(...),
     organizationId: str = Form(None),
     resume: UploadFile = File(None),
+    
+    # Supervisory Check 1 Fields
+    supervisory1_name: str = Form(None),
+    supervisory1_phone: str = Form(None),
+    supervisory1_email: str = Form(None),
+    supervisory1_relationship: str = Form(None),
+    supervisory1_company: str = Form(None),
+    supervisory1_designation: str = Form(None),
+    supervisory1_workingPeriod: str = Form(None),
+    
+    # Supervisory Check 2 Fields
+    supervisory2_name: str = Form(None),
+    supervisory2_phone: str = Form(None),
+    supervisory2_email: str = Form(None),
+    supervisory2_relationship: str = Form(None),
+    supervisory2_company: str = Form(None),
+    supervisory2_designation: str = Form(None),
+    supervisory2_workingPeriod: str = Form(None),
+    
+    # Employment History 1 Fields
+    employment1_company: str = Form(None),
+    employment1_designation: str = Form(None),
+    employment1_joiningDate: str = Form(None),
+    employment1_relievingDate: str = Form(None),
+    employment1_hrContact: str = Form(None),
+    employment1_hrEmail: str = Form(None),
+    employment1_hrName: str = Form(None),
+    employment1_address: str = Form(None),
+    
+    # Employment History 2 Fields
+    employment2_company: str = Form(None),
+    employment2_designation: str = Form(None),
+    employment2_joiningDate: str = Form(None),
+    employment2_relievingDate: str = Form(None),
+    employment2_hrContact: str = Form(None),
+    employment2_hrEmail: str = Form(None),
+    employment2_hrName: str = Form(None),
+    employment2_address: str = Form(None),
+    
+    # Education Check Fields
+    education_degree: str = Form(None),
+    education_specialization: str = Form(None),
+    education_universityName: str = Form(None),
+    education_collegeName: str = Form(None),
+    education_yearOfPassing: str = Form(None),
+    education_cgpa: str = Form(None),
+    education_universityContact: str = Form(None),
+    education_universityEmail: str = Form(None),
+    education_universityAddress: str = Form(None),
+    education_collegeContact: str = Form(None),
+    education_collegeEmail: str = Form(None),
+    education_collegeAddress: str = Form(None),
+    
+    # Document Uploads
+    relievingLetter1: UploadFile = File(None),
+    experienceLetter1: UploadFile = File(None),
+    salarySlips1: UploadFile = File(None),
+    relievingLetter2: UploadFile = File(None),
+    experienceLetter2: UploadFile = File(None),
+    salarySlips2: UploadFile = File(None),
+    educationCertificate: UploadFile = File(None),
+    marksheet: UploadFile = File(None),
+    
     user: dict = Depends(requireAuth)
 ):
     role = user.get("role")
@@ -4067,40 +4154,64 @@ async def addCandidate(
         )
 
     # ---------------------------------------------
-    # UPLOAD RESUME TO S3 (if provided)
+    # UPLOAD ALL DOCUMENTS TO S3 (if provided)
     # ---------------------------------------------
     resumePath = None
-    s3_upload_error = None
+    relievingLetter1Url = None
+    experienceLetter1Url = None
+    salarySlips1Url = None
+    relievingLetter2Url = None
+    experienceLetter2Url = None
+    salarySlips2Url = None
+    educationCertificateUrl = None
+    marksheetUrl = None
+    s3_upload_errors = []
     
-    if resume:
+    # Create S3 folder path: {orgName}/{firstName}_{lastName}/
+    folder_path = f"{orgName}/{firstName}_{lastName}".replace(" ", "_")
+    
+    # Helper function to upload a single file
+    async def upload_document(file: UploadFile, doc_type: str):
         try:
-            print(f"📄 Resume file received: {resume.filename}")
+            if not file:
+                return None
+            
+            print(f"📄 {doc_type} file received: {file.filename}")
             
             # Validate file type
-            ext = resume.filename.split(".")[-1].lower()
-            if ext not in ["pdf", "docx"]:
-                raise HTTPException(status_code=400, detail="Only PDF/DOCX files are supported for resume")
+            ext = file.filename.split(".")[-1].lower()
+            if ext not in ["pdf", "docx", "jpg", "jpeg", "png"]:
+                raise HTTPException(status_code=400, detail=f"Only PDF/DOCX/JPG/PNG files are supported for {doc_type}")
             
             # Read file content
-            file_content = await resume.read()
+            file_content = await file.read()
             
-            # Create S3 folder path: {orgName}/{firstName}_{lastName}/
-            folder_path = f"{orgName}/{firstName}_{lastName}".replace(" ", "_")
-            
-            # Create file name: {firstName}_{lastName}_resume.{ext}
-            file_name = f"{firstName}_{lastName}_resume.{ext}".replace(" ", "_")
+            # Create file name: {firstName}_{lastName}_{doc_type}.{ext}
+            file_name = f"{firstName}_{lastName}_{doc_type}.{ext}".replace(" ", "_")
             
             # Upload to S3
-            resumePath = await upload_to_s3(file_content, file_name, folder_path)
-            print(f"✅ Resume uploaded to S3: {resumePath}")
+            url = await upload_to_s3(file_content, file_name, folder_path)
+            print(f"✅ {doc_type} uploaded to S3: {url}")
+            return url
             
         except HTTPException:
             raise
         except Exception as e:
-            # Log error but don't fail candidate creation
-            s3_upload_error = str(e)
-            print(f"⚠️ S3 upload failed: {e}")
-            print(f"⚠️ Continuing with candidate creation without resume")
+            error_msg = f"{doc_type} upload failed: {str(e)}"
+            s3_upload_errors.append(error_msg)
+            print(f"⚠️ {error_msg}")
+            return None
+    
+    # Upload all documents
+    resumePath = await upload_document(resume, "resume")
+    relievingLetter1Url = await upload_document(relievingLetter1, "relieving_letter_1")
+    experienceLetter1Url = await upload_document(experienceLetter1, "experience_letter_1")
+    salarySlips1Url = await upload_document(salarySlips1, "salary_slips_1")
+    relievingLetter2Url = await upload_document(relievingLetter2, "relieving_letter_2")
+    experienceLetter2Url = await upload_document(experienceLetter2, "experience_letter_2")
+    salarySlips2Url = await upload_document(salarySlips2, "salary_slips_2")
+    educationCertificateUrl = await upload_document(educationCertificate, "education_certificate")
+    marksheetUrl = await upload_document(marksheet, "marksheet")
 
     # ---------------------------------------------
     # INSERT CANDIDATE (added new fields)
@@ -4133,6 +4244,81 @@ async def addCandidate(
     # Add resumePath if S3 upload succeeded
     if resumePath:
         candidateDoc["resumePath"] = resumePath
+    
+    # Add Supervisory Check 1 data
+    if supervisory1_name or supervisory1_phone:
+        candidateDoc["supervisoryCheck1"] = {
+            "name": supervisory1_name,
+            "phone": supervisory1_phone,
+            "email": supervisory1_email,
+            "relationship": supervisory1_relationship,
+            "company": supervisory1_company,
+            "designation": supervisory1_designation,
+            "workingPeriod": supervisory1_workingPeriod
+        }
+    
+    # Add Supervisory Check 2 data
+    if supervisory2_name or supervisory2_phone:
+        candidateDoc["supervisoryCheck2"] = {
+            "name": supervisory2_name,
+            "phone": supervisory2_phone,
+            "email": supervisory2_email,
+            "relationship": supervisory2_relationship,
+            "company": supervisory2_company,
+            "designation": supervisory2_designation,
+            "workingPeriod": supervisory2_workingPeriod
+        }
+    
+    # Add Employment History 1 data
+    if employment1_company or relievingLetter1Url:
+        candidateDoc["employmentHistory1"] = {
+            "company": employment1_company,
+            "designation": employment1_designation,
+            "joiningDate": employment1_joiningDate,
+            "relievingDate": employment1_relievingDate,
+            "hrContact": employment1_hrContact,
+            "hrEmail": employment1_hrEmail,
+            "hrName": employment1_hrName,
+            "address": employment1_address,
+            "relievingLetterUrl": relievingLetter1Url,
+            "experienceLetterUrl": experienceLetter1Url,
+            "salarySlipsUrl": salarySlips1Url
+        }
+    
+    # Add Employment History 2 data
+    if employment2_company or relievingLetter2Url:
+        candidateDoc["employmentHistory2"] = {
+            "company": employment2_company,
+            "designation": employment2_designation,
+            "joiningDate": employment2_joiningDate,
+            "relievingDate": employment2_relievingDate,
+            "hrContact": employment2_hrContact,
+            "hrEmail": employment2_hrEmail,
+            "hrName": employment2_hrName,
+            "address": employment2_address,
+            "relievingLetterUrl": relievingLetter2Url,
+            "experienceLetterUrl": experienceLetter2Url,
+            "salarySlipsUrl": salarySlips2Url
+        }
+    
+    # Add Education Check data
+    if education_degree or educationCertificateUrl:
+        candidateDoc["educationCheck"] = {
+            "certificateUrl": educationCertificateUrl,
+            "marksheetUrl": marksheetUrl,
+            "degree": education_degree,
+            "specialization": education_specialization,
+            "universityName": education_universityName,
+            "collegeName": education_collegeName,
+            "yearOfPassing": education_yearOfPassing,
+            "cgpa": education_cgpa,
+            "universityContact": education_universityContact,
+            "universityEmail": education_universityEmail,
+            "universityAddress": education_universityAddress,
+            "collegeContact": education_collegeContact,
+            "collegeEmail": education_collegeEmail,
+            "collegeAddress": education_collegeAddress
+        }
 
     if not orgId:
         raise HTTPException(status_code=400, detail="Internal error: missing organizationId before insert")
@@ -4157,20 +4343,50 @@ async def addCandidate(
     savedCandidate["_id"] = str(savedCandidate["_id"])
     
     # Build response message
-    response_message = "Candidate added successfully"
+    uploaded_docs = []
     if resumePath:
-        response_message += " with resume uploaded to S3"
-    elif s3_upload_error:
-        response_message += f" (Warning: Resume upload failed - {s3_upload_error})"
+        uploaded_docs.append("resume")
+    if relievingLetter1Url:
+        uploaded_docs.append("relieving_letter_1")
+    if experienceLetter1Url:
+        uploaded_docs.append("experience_letter_1")
+    if salarySlips1Url:
+        uploaded_docs.append("salary_slips_1")
+    if relievingLetter2Url:
+        uploaded_docs.append("relieving_letter_2")
+    if experienceLetter2Url:
+        uploaded_docs.append("experience_letter_2")
+    if salarySlips2Url:
+        uploaded_docs.append("salary_slips_2")
+    if educationCertificateUrl:
+        uploaded_docs.append("education_certificate")
+    if marksheetUrl:
+        uploaded_docs.append("marksheet")
+    
+    response_message = "Candidate added successfully"
+    if uploaded_docs:
+        response_message += f" with {len(uploaded_docs)} document(s) uploaded to S3"
+    if s3_upload_errors:
+        response_message += f" (Warnings: {'; '.join(s3_upload_errors)})"
 
     return JSONResponse(
         status_code=201,
         content=jsonable_encoder({
             "message": response_message,
             "candidate": savedCandidate,
-            "resumeUploaded": resumePath is not None,
-            "resumePath": resumePath,
-            "s3UploadError": s3_upload_error
+            "uploadedDocuments": uploaded_docs,
+            "documentUrls": {
+                "resume": resumePath,
+                "relievingLetter1": relievingLetter1Url,
+                "experienceLetter1": experienceLetter1Url,
+                "salarySlips1": salarySlips1Url,
+                "relievingLetter2": relievingLetter2Url,
+                "experienceLetter2": experienceLetter2Url,
+                "salarySlips2": salarySlips2Url,
+                "educationCertificate": educationCertificateUrl,
+                "marksheet": marksheetUrl
+            },
+            "s3UploadErrors": s3_upload_errors if s3_upload_errors else None
         })
     )
 

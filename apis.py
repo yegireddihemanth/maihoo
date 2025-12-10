@@ -128,16 +128,94 @@ async def verify_credit_report(candidate: dict):
     return await post_json(url, headers, payload)
 
 async def verify_court_record(candidate: dict):
+    """
+    Court record verification with exact name matching
+    - Searches current year (covers all years in results)
+    - Filters to only include exact name matches where candidate is respondent
+    """
     url = "https://kyc-api.surepass.io/api/v1/ecourts/ecourt-search-v2"
     headers = {"Authorization": f"Bearer {SUREPASS_TOKEN}", "Content-Type": "application/json"}
+    
+    # Get current year for search
+    current_year = str(datetime.now().year)
+    
+    # Note: State field is omitted because API expects specific state codes
+    # Omitting it searches all states (better coverage)
     payload = {
         "name": f"{candidate.get('firstName')} {candidate.get('lastName')}",
         "father_name": "",
         "address": candidate.get("address", ""),
-        "year": "",
-        "state": ""
+        "year": current_year  # Current year search (API returns all years)
+        # "state" field omitted - searches all states
     }
-    return await post_json(url, headers, payload)
+    
+    print(f"🔍 Court record search for: {payload['name']}, Year: {current_year}, Address: {payload['address']}")
+    
+    # Make API call
+    status, response = await post_json(url, headers, payload)
+    
+    # If API call failed, return as is
+    if status != "COMPLETED":
+        return status, response
+    
+    # Extract candidate names for matching
+    first_name = candidate.get('firstName', '').lower().strip()
+    last_name = candidate.get('lastName', '').lower().strip()
+    
+    print(f"🔍 Filtering court records for exact match: {first_name} {last_name}")
+    
+    # Filter results to exact matches only
+    if isinstance(response, dict) and 'data' in response and 'result' in response['data']:
+        all_cases = response['data']['result']
+        matched_cases = []
+        
+        for case in all_cases:
+            if not isinstance(case, dict):
+                continue
+            
+            respondent = case.get('respondent', '').lower()
+            
+            # Normalize respondent name (remove dots, extra spaces)
+            respondent_normalized = respondent.replace('.', ' ').replace(',', ' ')
+            respondent_normalized = ' '.join(respondent_normalized.split())
+            
+            # Check if BOTH first name AND last name are in respondent field
+            if first_name in respondent_normalized and last_name in respondent_normalized:
+                matched_cases.append(case)
+                print(f"✅ Match found: {case.get('respondent')} in case {case.get('case_name')}")
+                
+                # Limit to first 2 matches only
+                if len(matched_cases) >= 2:
+                    print(f"⚠️ Limiting results to first 2 matches")
+                    break
+            else:
+                print(f"❌ Skipped: {case.get('respondent')} (not exact match)")
+        
+        # Build filtered response
+        filtered_response = {
+            "success": response.get('success', True),
+            "message": response.get('message', 'Success'),
+            "data": {
+                "client_id": response['data'].get('client_id'),
+                "name": response['data'].get('name'),
+                "father_name": response['data'].get('father_name'),
+                "address": response['data'].get('address'),
+                "year": response['data'].get('year'),
+                "state": response['data'].get('state'),
+                "total_cases_from_api": len(all_cases),
+                "exact_matches_found": len(matched_cases),
+                "result": matched_cases,
+                "filtering_applied": True,
+                "filter_criteria": f"Exact match for '{first_name} {last_name}' as respondent"
+            }
+        }
+        
+        print(f"📊 Court records: {len(all_cases)} total, {len(matched_cases)} exact matches")
+        
+        return status, filtered_response
+    
+    # If response format is unexpected, return as is
+    return status, response
 
 
 # ---------------------------------------------------
